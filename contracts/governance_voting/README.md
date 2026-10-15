@@ -2,6 +2,23 @@
 
 A comprehensive on-chain governance system for the Kora Protocol, supporting vote delegation and quadratic voting for community-driven decision making.
 
+## Deployment inputs and workspace CI
+
+`GovernanceVotingContractClient` is the generated Rust client for this crate.
+Initialize it with the admin address and the access-control contract address.
+These are explicit on-chain inputs; the contract reads no environment variables.
+For the forum bridge, `GOVERNANCE_CONTRACT_ID` must be this deployment's address,
+and `SOROBAN_RPC_URL` selects its network's RPC endpoint. See the bridge's
+[configuration and client mapping](../../services/governance-sync/README.md#configuration).
+The separate governance upgrade and parameter-registry addresses are incompatible.
+
+CI runs `cargo test -p kora-governance-voting` as a dedicated matrix entry (#912),
+with workspace fmt/clippy/tests also including the crate. Persistent proposal,
+vote, weight, and delegation writes extend TTL using the contract's bump helper.
+Release artifact `kora_governance_voting.wasm` is included in the size gate.
+No build, tests, or formatter were run for this onboarding change at the user's
+request; coverage percentages below are existing targets, not measured results.
+
 ## Features
 
 ### 1. Vote Delegation

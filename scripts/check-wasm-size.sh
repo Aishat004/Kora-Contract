@@ -20,8 +20,9 @@ if [ ! -f "$BUDGET_FILE" ]; then
   exit 1
 fi
 
-CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle tranche dispute_resolution"
+CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry"
 HAS_OVERAGE=0
+HAS_MISSING=0
 
 echo "| Contract | Size (bytes) | Budget (bytes) | Status |"
 echo "|---|---|---|---|"
@@ -31,6 +32,10 @@ for c in $CONTRACTS; do
   [ -f "$wasm" ] || wasm="$WASM_DIR/kora_${c}.wasm"
 
   if [ ! -f "$wasm" ]; then
+    if [ "${REQUIRE_ALL_WASMS:-0}" = "1" ]; then
+      echo "ERROR: Missing release WASM for kora_${c}"
+      HAS_MISSING=1
+    fi
     continue
   fi
 
@@ -47,6 +52,11 @@ for c in $CONTRACTS; do
     echo "| \`kora_${c}\` | $sz B | $budget B | ✓ OK (${under} B under) |"
   fi
 done
+
+if [ "$HAS_MISSING" -eq 1 ]; then
+  echo "FAILED: Required release artifacts are missing."
+  exit 1
+fi
 
 if [ "$HAS_OVERAGE" -eq 1 ]; then
   echo ""

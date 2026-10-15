@@ -1,0 +1,18 @@
+{
+  "default_budget_bytes": 122880,
+  "budgets": {
+    "access_control": 122880,
+    "invoice_nft": 122880,
+    "risk_registry": 122880,
+    "treasury": 122880,
+    "financing_pool": 153600,
+    "marketplace": 153600,
+    "price_oracle": 102400,
+    "tranche": 102400,
+    "dispute_resolution": 122880,
+    "dispute_escrow": 122880,
+    "governance": 122880,
+    "governance_voting": 122880,
+    "parameter_registry": 122880
+  }
+}

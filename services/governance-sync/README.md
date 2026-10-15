@@ -30,7 +30,7 @@ Environment variables:
 # Soroban RPC endpoint
 SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 
-# Governance contract address
+# Deployed governance_voting address (not governance or parameter_registry)
 GOVERNANCE_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 # Forum API credentials
@@ -50,6 +50,18 @@ DB_PATH=./governance-sync.db
 # Logging level
 LOG_LEVEL=info
 ```
+
+`GOVERNANCE_CONTRACT_ID` must identify the contract with the `Proposal` schema
+in [`kora-governance-voting`](../../contracts/governance_voting/src/lib.rs).
+Its generated Rust typed client is `GovernanceVotingContractClient`; use
+`get_proposal` to read the title, description, and three vote tallies consumed
+by this bridge. See the [client example](../../contracts/governance_voting/README.md#integration-example).
+The separate [`GovernanceContractClient`](../../contracts/governance/src/lib.rs)
+uses upgrade proposals, and [`ParameterRegistryContractClient`](../../contracts/parameter_registry/src/lib.rs)
+uses parameter proposals; their addresses and return types are not interchangeable.
+The TypeScript [`KoraClient`](../../sdk/src/KoraClient.ts) currently exposes
+access-control governance only, so this bridge does not have a generated
+TypeScript governance-voting binding yet.
 
 ## Installation
 
