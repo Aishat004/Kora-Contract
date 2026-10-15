@@ -101,3 +101,23 @@ same as any other merged PR — see [`CONTRIBUTING.md` §
 Recognition](../CONTRIBUTING.md#recognition). It's also the fastest way to
 build the track record that makes a Wave application (see
 [`docs/wave-dashboard.md`](wave-dashboard.md)) easy to say yes to.
+
+## Curated Candidate Pipeline (Issue #893 Resolution)
+
+In response to tracking issue #893 identifying an empty curation pipeline, the following candidate issues have been triaged against the rubric and are ready for assignment:
+
+### Candidate 1: Standardize unused emit helpers in financing pool
+- **Rubric check**: Touches 1 file (`contracts/financing_pool/src/lib.rs`), no storage layout change, clear acceptance criteria, ~2-4 hours.
+- **Scope**: Clean up deprecated/redundant local emit helpers and ensure all financing pool event emissions reference `kora_shared::events::*`.
+- **Criteria**: Remove duplicate emit functions; confirm zero warnings in `financing_pool`.
+
+### Candidate 2: Document error variant mappings in xtask
+- **Rubric check**: Touches 1 file (`contracts/xtask/src/main.rs` or docs), mechanical update, no architectural decision, ~2 hours.
+- **Scope**: Add documentation and missing error code documentation discovered by `check-error-variants`.
+- **Criteria**: Update check-error-variants helper output with descriptive troubleshooting hints.
+
+### Candidate 3: Fix doc/code drift in access control views
+- **Rubric check**: Touches 1 doc file (`docs/access-control.md`), docs-only, ~1 hour.
+- **Scope**: Ensure doc comments in `docs/access-control.md` match public view functions in `contracts/access_control/src/lib.rs`.
+- **Criteria**: Align function parameter lists and return error enums.
+
