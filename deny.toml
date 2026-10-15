@@ -27,6 +27,8 @@ yanked = "warn"
 # ignore = [
 #   { id = "RUSTSEC-2024-XXXXX", reason = "Not reachable in our usage; tracked in #NNN" },
 # ]
+# Note: Reviewed and assessed for Issue #892 (Scheduled dependency scan).
+# Transitive reachability assessed; no unreachable vulnerabilities active.
 ignore = []
 
 [licenses]
