@@ -505,6 +505,16 @@ impl FinancingPoolContract {
         Self::require_admin(&env, &caller)?;
         Self::require_not_paused(&env)?;
 
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+        if nft_client.is_invoice_frozen(&invoice_id) {
+            return Err(FinancingPoolError::InvoiceFrozen);
+        }
+
         if contributed <= 0 || total_pool <= 0 {
             return Err(FinancingPoolError::InvalidAmount);
         }
@@ -3066,6 +3076,47 @@ mod tests {
         assert!(client
             .try_record_position(&admin, &1u64, &investor, &100i128, &0i128)
             .is_err());
+    }
+
+    #[test]
+    fn test_record_position_blocked_when_invoice_frozen() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let nft = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft);
+        nft_client.initialize(&admin);
+
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let ac = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac);
+        ac_client.initialize(&admin);
+        let oracle = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &nft,
+            &rr,
+            &treasury,
+            &ac,
+            &200u32,
+            &oracle,
+            &10_000u32,
+            &0u64,
+            &dispute_resolution,
+        );
+
+        let sme = Address::generate(&env);
+        let invoice_id = nft_client.mint_invoice(&sme, &10_000_000_000i128, &oracle, &1_000_000u64, &oracle);
+        nft_client.freeze_invoice(&admin, &invoice_id);
+
+        let investor = Address::generate(&env);
+        let result = client.try_record_position(&admin, &invoice_id, &investor, &5_000_000_000i128, &10_000_000_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvoiceFrozen);
     }
 
     #[test]

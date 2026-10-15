@@ -158,7 +158,7 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `set_marketplace` | **Admin** | | For auto-compound routing |
 | `set_auto_compound` | **Investor (Self)** | | Opt-in to reinvestment |
 | `release_funds` | **Marketplace Contract** | Caller must be marketplace; invoice fully funded | Transfers pool to SME |
-| `record_position` | **Admin** (Marketplace) | Blocks if positions ≥ MAX_POSITIONS_PER_POOL (100) | DoS protection |
+| `record_position` | **Admin** (Marketplace) | Not paused; invoice not frozen; blocks if positions ≥ MAX_POSITIONS_PER_POOL (100) | DoS protection & freeze guard |
 | `repay_partial` | **SME (invoice owner)** | Invoice not frozen; no reentrancy lock | |
 | `repay` | **SME (invoice owner)** | Invoice not frozen; no reentrancy lock | Full or installment repayment |
 | `net_settle` | **SME (payer)** | All invoices belong to payer; ≤ MAX_NETTING_INVOICES (10) | Cross-invoice netting |
