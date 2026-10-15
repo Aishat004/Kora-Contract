@@ -782,6 +782,16 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::NotPositionOwner);
         }
 
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+
+        if let Some(offer) = env.storage().persistent().get::<DataKey, EarlySettlementOffer>(&DataKey::EarlySettlement(invoice_id)) {
+            if offer.accepted.iter().any(|a| a == seller) {
+                return Err(FinancingPoolError::Unauthorized);
+            }
+        }
+
         if env.storage().persistent().has(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index)) {
             return Err(FinancingPoolError::SaleAlreadyListed);
         }
@@ -816,6 +826,10 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         buyer.require_auth();
         Self::require_not_paused(&env)?;
+
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
 
         let offer: ShareSaleOffer = env
             .storage()
