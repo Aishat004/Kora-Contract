@@ -84,6 +84,20 @@ pub enum FinancingPoolError {
     ApprovalPending = 33,
     ApprovalThresholdNotMet = 34,
     GracePeriodActive = 35,
+    EscrowPending = 36,
+    EscrowNotFound = 37,
+    InvalidMigrationTarget = 38,
+    MigrationVersionMismatch = 39,
+    TooManyInvestors = 40,
+}
+
+impl From<kora_shared::migration::MigrationError> for FinancingPoolError {
+    fn from(error: kora_shared::migration::MigrationError) -> Self {
+        match error {
+            kora_shared::migration::MigrationError::VersionMismatch => Self::MigrationVersionMismatch,
+            _ => Self::InvalidMigrationTarget,
+        }
+    }
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -103,6 +117,14 @@ impl From<CommonError> for FinancingPoolError {
 
 #[contracttype]
 pub enum DataKey {
+    SchemaVersion,
+    /// One-time configured dispute escrow; callbacks authenticate this contract.
+    DisputeEscrow,
+    /// Exact payment held outside pool accounting until escrow adjudication.
+    EscrowPending(u64),
+    /// Escrow repayments remain in custody until lump-sum completion. Prevent
+    /// mixing them with the legacy immediate-distribution repay_partial path.
+    EscrowCredited(u64),
     Pool(u64),
     Positions(u64),
     Admin,
@@ -166,6 +188,276 @@ pub struct FinancingPoolContract;
 
 #[contractimpl]
 impl FinancingPoolContract {
+    /// Configure the sole escrow callback authority once. Existing deployment
+    /// initialization stays compatible; governance must wire escrow before use.
+    pub fn set_dispute_escrow(
+        env: Env,
+        admin: Address,
+        escrow: Address,
+    ) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &escrow)?;
+        if env.storage().instance().has(&DataKey::DisputeEscrow) {
+            return Err(FinancingPoolError::AlreadyInitialized);
+        }
+        env.storage().instance().set(&DataKey::DisputeEscrow, &escrow);
+        Ok(())
+    }
+
+    /// Quote fresh lump-sum debt in pool-token base units. Schedules and
+    /// buyouts use separate accounting and cannot enter this escrow flow.
+    pub fn escrow_terms(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<(Address, Address, i128), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RepaymentLock(invoice_id))
+        {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+        let pool = Self::get_pool(env.clone(), invoice_id)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+        if pool.repaid_amount != 0
+            || pool.late_penalty_bps != 0
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::InstallmentSchedule(invoice_id))
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::EarlySettlement(invoice_id))
+        {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        let remaining = pool
+            .total_owed
+            .checked_sub(pool.repaid_amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if remaining <= 0 {
+            return Err(FinancingPoolError::RepaymentAlreadyMade);
+        }
+        // Escrow adjudication is separate from the high-value approval path.
+        if remaining >= REPAYMENT_APPROVAL_THRESHOLD {
+            return Err(FinancingPoolError::ApprovalThresholdNotMet);
+        }
+        let invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.status != kora_shared::types::InvoiceStatus::Funded {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+        Self::require_escrow_invoice_unfrozen(&env, invoice_id)?;
+        // Escrow amounts are base units with no oracle conversion. Restrict
+        // this path to matching seven-decimal invoice and token currencies.
+        if token::Client::new(&env, &pool.token).decimals() != 7
+            || invoice.currency != Self::pool_token_currency(&env, &pool.token)?
+        {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        Ok((pool.token, invoice.sme, remaining))
+    }
+
+    pub fn has_position(env: Env, invoice_id: u64, investor: Address) -> bool {
+        let positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+        positions
+            .get(investor)
+            .map(|position| position.contributed > 0)
+            .unwrap_or(false)
+    }
+
+    /// Reserve before escrow transfers tokens, preventing competing repayment
+    /// or position changes during the token interaction and adjudication.
+    pub fn reserve_escrow(
+        env: Env,
+        escrow: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), FinancingPoolError> {
+        Self::require_escrow(&env, &escrow)?;
+        Self::require_not_paused(&env)?;
+        let (_, _, remaining) = Self::escrow_terms(env.clone(), invoice_id)?;
+        if amount <= 0 || amount > MAX_AMOUNT || amount > remaining {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        let key = DataKey::EscrowPending(invoice_id);
+        env.storage().persistent().set(&key, &amount);
+        // Match the escrow record's retention window so the reservation cannot
+        // disappear while that record is still actionable.
+        env.storage().persistent().extend_ttl(&key, 518_400, 518_400);
+        Ok(())
+    }
+
+    /// Escrow has already transferred the reserved tokens to this pool (or
+    /// refunded its payer). Only pool-directed payments enter repayment stats.
+    /// Partial credits remain in pool custody until normal repay completes.
+    pub fn settle_escrow(
+        env: Env,
+        escrow: Address,
+        invoice_id: u64,
+        amount: i128,
+        pay_pool: bool,
+    ) -> Result<(), FinancingPoolError> {
+        Self::require_escrow(&env, &escrow)?;
+        let key = DataKey::EscrowPending(invoice_id);
+        let reserved: i128 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(FinancingPoolError::EscrowNotFound)?;
+        if amount != reserved || amount <= 0 {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RepaymentLock(invoice_id))
+        {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+        if !pay_pool {
+            env.storage().persistent().remove(&key);
+            return Ok(());
+        }
+        let mut pool = Self::get_pool(env.clone(), invoice_id)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+        let invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.status != kora_shared::types::InvoiceStatus::Funded {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+        Self::require_escrow_invoice_unfrozen(&env, invoice_id)?;
+        let new_repaid = pool
+            .repaid_amount
+            .checked_add(amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if new_repaid > pool.total_owed {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        pool.repaid_amount = new_repaid;
+        pool.is_closed = new_repaid == pool.total_owed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentLock(invoice_id), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Pool(invoice_id), &pool);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowCredited(invoice_id), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowCredited(invoice_id),
+            518_400,
+            518_400,
+        );
+        let mut stats = Self::get_protocol_stats(env.clone());
+        stats.total_repaid = stats
+            .total_repaid
+            .checked_add(amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if pool.is_closed {
+            stats.active_pools = stats.active_pools.saturating_sub(1);
+        }
+        env.storage().instance().set(&DataKey::ProtocolStats, &stats);
+        events::repayment_made(&env, invoice_id, &escrow, amount);
+        if pool.is_closed {
+            Self::distribute_yield(&env, invoice_id, &pool.token, new_repaid, pool.face_value)?;
+            let nft: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::InvoiceNft)
+                .ok_or(FinancingPoolError::NotInitialized)?;
+            kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft)
+                .set_repaid(&env.current_contract_address(), &invoice_id);
+        }
+        env.storage().persistent().remove(&key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::RepaymentLock(invoice_id));
+        Ok(())
+    }
+
+    fn require_escrow(env: &Env, escrow: &Address) -> Result<(), FinancingPoolError> {
+        escrow.require_auth();
+        let configured: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeEscrow)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        if escrow != &configured {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn require_no_escrow(env: &Env, invoice_id: u64) -> Result<(), FinancingPoolError> {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::EscrowPending(invoice_id))
+        {
+            return Err(FinancingPoolError::EscrowPending);
+        }
+        Ok(())
+    }
+
+    fn require_no_escrow_credit(env: &Env, invoice_id: u64) -> Result<(), FinancingPoolError> {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::EscrowCredited(invoice_id))
+        {
+            return Err(FinancingPoolError::PartialRepayInvalid);
+        }
+        Ok(())
+    }
+
+    fn require_escrow_invoice_unfrozen(
+        env: &Env,
+        invoice_id: u64,
+    ) -> Result<(), FinancingPoolError> {
+        let nft: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        if kora_invoice_nft::InvoiceNftContractClient::new(env, &nft)
+            .is_invoice_frozen(&invoice_id)
+        {
+            return Err(FinancingPoolError::InvoiceFrozen);
+        }
+        Ok(())
+    }
+
+    /// Convert token metadata to the protocol's currency-symbol representation.
+    fn pool_token_currency(env: &Env, asset: &Address) -> Result<Symbol, FinancingPoolError> {
+        let symbol = token::Client::new(env, asset).symbol();
+        let len = symbol.len() as usize;
+        if len == 0 || len > 32 {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        let mut bytes = [0u8; 32];
+        symbol.copy_into_slice(&mut bytes[..len]);
+        if !bytes[..len]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        let text =
+            core::str::from_utf8(&bytes[..len]).map_err(|_| FinancingPoolError::InvalidAmount)?;
+        Ok(Symbol::new(env, text))
+    }
+
     /// Explicit admin migration. Legacy deployments start at version zero.
     pub fn migrate_versions(
         env: Env, admin: Address, from_version: u32, to_version: u32,
@@ -501,6 +793,8 @@ impl FinancingPoolContract {
         contributed: i128,
         total_pool: i128,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow_credit(&env, invoice_id)?;
+        Self::require_no_escrow(&env, invoice_id)?;
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         Self::require_not_paused(&env)?;
@@ -613,6 +907,7 @@ impl FinancingPoolContract {
         invoice_id: u64,
         amount: i128,
     ) -> Result<u32, FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         caller.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -701,6 +996,7 @@ impl FinancingPoolContract {
         share_index: u32,
         new_owner: Address,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         caller.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -752,6 +1048,7 @@ impl FinancingPoolContract {
         token: Address,
         price: i128,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         seller.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -814,6 +1111,7 @@ impl FinancingPoolContract {
         original_investor: Address,
         share_index: u32,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         buyer.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -890,6 +1188,12 @@ impl FinancingPoolContract {
         amount: i128,
     ) -> Result<(), FinancingPoolError> {
         payer.require_auth();
+
+        // Escrow credits use the normal lump-sum custody model; this legacy
+        // entrypoint distributes immediately and cannot safely mix with them.
+        if env.storage().persistent().has(&DataKey::EscrowCredited(invoice_id)) {
+            return Err(FinancingPoolError::PartialRepayInvalid);
+        }
 
         if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
             return Err(FinancingPoolError::EscrowPending);
@@ -1282,6 +1586,7 @@ impl FinancingPoolContract {
         for i in 0..n {
             let invoice_id = invoice_ids.get(i).unwrap();
 
+            Self::require_no_escrow_credit(&env, invoice_id)?;
             if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
                 return Err(FinancingPoolError::EscrowPending);
             }
@@ -1605,7 +1910,7 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::Unauthorized);
         }
 
-        let pool: Pool = env
+        let mut pool: Pool = env
             .storage()
             .persistent()
             .get(&DataKey::Pool(invoice_id))
@@ -1651,6 +1956,13 @@ impl FinancingPoolContract {
             }
         }
 
+        // Escrow credits have never been distributed. Close before external
+        // calls so a default cannot distribute their held balance twice.
+        if env.storage().persistent().has(&DataKey::EscrowCredited(invoice_id)) {
+            pool.is_closed = true;
+            env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+        }
+
         if pool.repaid_amount > 0 {
             Self::distribute_yield(&env, invoice_id, &token, pool.repaid_amount, pool.face_value)?;
         }
@@ -1689,9 +2001,6 @@ impl FinancingPoolContract {
     }
 
     // ── Multi-Signature Repayment Approval (#580) ──────────────────────────────
-
-    /// Threshold above which a repayment requires N-of-M approvals before execution.
-    const REPAYMENT_APPROVAL_THRESHOLD: i128 = 10_000_000_000i128;
 
     /// Propose a high-value repayment for approval. Any address may propose; the
     /// proposal is recorded on-chain for designated approvers to co-sign.
@@ -1889,6 +2198,8 @@ impl FinancingPoolContract {
         invoice_id: u64,
         amount: i128,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow_credit(&env, invoice_id)?;
+        Self::require_no_escrow(&env, invoice_id)?;
         sme.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -1960,6 +2271,7 @@ impl FinancingPoolContract {
         investor: Address,
         invoice_id: u64,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         investor.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -2078,6 +2390,7 @@ impl FinancingPoolContract {
         sme: Address,
         invoice_id: u64,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         sme.require_auth();
 
         let offer: EarlySettlementOffer = env
@@ -2191,6 +2504,8 @@ impl FinancingPoolContract {
         invoice_id: u64,
         schedule: InstallmentSchedule,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow_credit(&env, invoice_id)?;
+        Self::require_no_escrow(&env, invoice_id)?;
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
@@ -2279,6 +2594,7 @@ impl FinancingPoolContract {
         token: Address,
         price: i128,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         seller.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -2382,6 +2698,7 @@ impl FinancingPoolContract {
         invoice_id: u64,
         seller: Address,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         buyer.require_auth();
         Self::require_not_paused(&env)?;
 
@@ -2560,7 +2877,7 @@ impl FinancingPoolContract {
         env: &Env,
         amount: i128,
         invoice_currency: &Symbol,
-        _pool_token: &Address,
+        pool_token: &Address,
     ) -> Result<i128, FinancingPoolError> {
         let oracle_addr: Option<Address> = env
             .storage()
@@ -2585,6 +2902,15 @@ impl FinancingPoolContract {
         // they never handle cross-currency invoices.
         if invoice_currency == &pool_currency {
             return Ok(amount);
+        }
+
+        // A partial escrow credit and its normal repayment completion must use
+        // the same base units. Honor real token metadata for matching currencies
+        // before the legacy cross-currency USDC oracle fallback below.
+        if let Ok(actual_currency) = Self::pool_token_currency(env, pool_token) {
+            if invoice_currency == &actual_currency {
+                return Ok(amount);
+            }
         }
 
         let oracle_client =
@@ -2646,6 +2972,7 @@ impl FinancingPoolContract {
         from: Address,
         to: Address,
     ) -> Result<(), FinancingPoolError> {
+        Self::require_no_escrow(&env, invoice_id)?;
         from.require_auth();
         Self::require_not_paused(&env)?;
 

@@ -708,6 +708,7 @@ dependencies = [
 name = "kora-dispute-escrow"
 version = "0.1.0"
 dependencies = [
+ "kora-shared",
  "soroban-sdk",
 ]
 
@@ -861,6 +862,8 @@ name = "kora-tests"
 version = "0.1.0"
 dependencies = [
  "kora-access-control",
+ "kora-dispute-escrow",
+ "kora-dispute-resolution",
  "kora-financing-pool",
  "kora-invoice-nft",
  "kora-marketplace",
