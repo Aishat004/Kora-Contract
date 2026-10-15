@@ -71,8 +71,10 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `initialize` | None (one-time) | Must not already be initialized | |
 | `register_sme` | **Self (SME)** | Caller authorizes; verifier attests separately | Permissionless registration |
 | `update_sme_profile` | **Verifier** (assigned to SME) | Must be SME's verifier-of-record | |
-| `register_verifier` | **Admin** | | Requires staking token transfer |
-| `remove_verifier` | **Admin** | | Returns stake; slashing may apply |
+| `register_verifier` | **Admin** | | Requires staking token transfer; grants Verifier role in access_control |
+| `remove_verifier` | **Admin** | | Returns stake; revokes Verifier role in access_control |
+| `set_access_control` | **Admin** | | Wires access_control contract address |
+| `get_access_control` | Permissionless | Read-only | Returns configured access_control address |
 | `set_debtor_score` | **Verifier** | MIN_SCORE_UPDATE_INTERVAL cooldown | Max 50 verifiers per debtor |
 | `get_debtor_score` | Permissionless | Read-only | Aggregates from active verifiers |
 | `set_credit_limit` | **Verifier** (assigned to SME) | Must be SME's verifier-of-record | |
