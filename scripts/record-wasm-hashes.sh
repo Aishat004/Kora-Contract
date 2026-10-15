@@ -54,6 +54,12 @@ CONTRACTS=(
   "treasury"
   "risk_registry"
   "price_oracle"
+  "tranche"
+  "dispute_resolution"
+  "dispute_escrow"
+  "governance"
+  "governance_voting"
+  "parameter_registry"
 )
 
 # ── Detect toolchain ────────────────────────────────────────────────────────

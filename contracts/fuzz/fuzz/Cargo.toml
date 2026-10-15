@@ -17,6 +17,13 @@ panic = "unwind"
 debug = 1
 
 [[bin]]
+name = "fuzz_dispute_resolution"
+path = "fuzz_targets/fuzz_dispute_resolution.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_access_control"
 path = "fuzz_targets/fuzz_access_control.rs"
 test = false

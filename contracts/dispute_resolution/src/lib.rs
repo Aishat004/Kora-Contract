@@ -290,7 +290,11 @@ mod tests {
         let contract_id = env.register_contract(None, DisputeResolutionContract);
         let client = DisputeResolutionContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let ac = Address::generate(&env);
+        let ac = env.register_contract(None, kora_access_control::AccessControlContract);
+        let access = kora_access_control::AccessControlContractClient::new(&env, &ac);
+        access.initialize(&admin);
+        // Resolution checks signer membership; an admin alone is insufficient.
+        access.configure_multisig(&admin, &soroban_sdk::vec![&env, admin.clone()], &1);
         client.initialize(&admin, &ac);
         (env, admin, ac, client)
     }
@@ -299,7 +303,7 @@ mod tests {
     fn test_open_dispute_success() {
         let (_env, _admin, _ac, client) = setup();
         let challenger = Address::generate(&_env);
-        assert!(client.try_open_dispute(&challenger, &1u64).is_ok());
+        assert_eq!(client.try_open_dispute(&challenger, &1u64), Ok(Ok(())));
         assert!(client.has_open_dispute(&1u64));
     }
 
@@ -318,7 +322,7 @@ mod tests {
         let challenger = Address::generate(&env);
         client.open_dispute(&challenger, &1u64);
         let cid = String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
-        assert!(client.try_submit_evidence(&challenger, &1u64, &cid).is_ok());
+        assert_eq!(client.try_submit_evidence(&challenger, &1u64, &cid), Ok(Ok(())));
     }
 
     #[test]
@@ -326,7 +330,7 @@ mod tests {
         let (env, admin, _ac, client) = setup();
         let challenger = Address::generate(&env);
         client.open_dispute(&challenger, &1u64);
-        assert!(client.try_resolve_dispute(&admin, &1u64, &true).is_ok());
+        assert_eq!(client.try_resolve_dispute(&admin, &1u64, &true), Ok(Ok(())));
         let dispute = client.get_dispute(&1u64).unwrap();
         assert!(dispute.resolved);
         assert!(dispute.upheld);

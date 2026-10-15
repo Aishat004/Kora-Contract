@@ -42,6 +42,33 @@ exact deposited pool-token amount and does not advance installment schedules.
 
 ## Validation
 
+### Workspace and release size gate (#911)
+
+`kora-dispute-escrow` is a workspace member. `make build` explicitly builds
+the deployable contract packages, including this crate, and produces
+`target/wasm32-unknown-unknown/release/kora_dispute_escrow.wasm`.
+`make build-optimized` optimizes it alongside the other deployable contracts.
+The WASM size workflow requires the release artifact and applies the
+`dispute_escrow` budget in `wasm-budgets.json` (122,880 bytes); an overage
+fails CI under the existing size-increase approval policy. Release hash
+recording includes the same artifact. See [performance budgets](PERFORMANCE.md)
+for the provisional-cap rationale; this onboarding did not run builds or
+measure the binary.
+
+`scripts/deploy.sh` uses the exact `kora_dispute_escrow.wasm` filename when
+`DEPLOY_DISPUTE_ESCROW=true` is set (default: false). This is opt-in because
+the current financing pool does not implement the required `escrow_terms`,
+`reserve_escrow`, `settle_escrow`, and `set_dispute_escrow` hooks. Enabling it
+deploys and initializes the escrow and records its address/hash, but pool
+integration must be implemented before using the custody flow above.
+
+### State-machine fuzzing (#919)
+
+See [the dispute fuzz model and coverage gaps](dispute-fuzz.md) and the
+[fuzz target inventory](../contracts/fuzz/README.md). Resolution of defaults
+and repayment custody are separate APIs; a mock cannot establish production
+pool/token integration safety.
+
 The escrow crate has tests for custody before resolution, both adjudication
 routes, repeat-dispute rejection, and the timeout boundary. Run
 `cargo test -p kora-dispute-escrow` and the financing pool suite in a working

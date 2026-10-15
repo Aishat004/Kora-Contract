@@ -8,6 +8,7 @@
 //! and is reported as a finding.
 
 pub mod access_control;
+pub mod dispute_resolution;
 pub mod financing_pool;
 pub mod invoice_nft;
 pub mod marketplace;

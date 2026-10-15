@@ -90,6 +90,23 @@ smoke!(fuzz_financing_pool, "financing_pool", kora_fuzz::targets::financing_pool
 smoke!(fuzz_treasury, "treasury", kora_fuzz::targets::treasury::run, 0x7EA5);
 smoke!(fuzz_risk_registry, "risk_registry", kora_fuzz::targets::risk_registry::run, 0x815C);
 smoke!(fuzz_price_oracle, "price_oracle", kora_fuzz::targets::price_oracle::run, 0x0AC1);
+smoke!(fuzz_dispute_resolution, "dispute_resolution", kora_fuzz::targets::dispute_resolution::run, 0xD159);
+
+#[test]
+fn dispute_invariants_ci_corpus_replay() {
+    replay_corpus("dispute_resolution", kora_fuzz::targets::dispute_resolution::run);
+}
+
+#[test]
+fn dispute_invariants_ci_bounded_random_walk() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xD159_C1);
+    let mut buf = [0u8; 4 * kora_fuzz::MAX_OPS];
+    for i in 0..32 {
+        rng.fill_bytes(&mut buf);
+        check_once("dispute_resolution", kora_fuzz::targets::dispute_resolution::run,
+            &buf, &format!("ci_dispute_random_walk iter={i}/32"));
+    }
+}
 
 // ── CI-bounded fee invariant tests ────────────────────────────────────────────
 //

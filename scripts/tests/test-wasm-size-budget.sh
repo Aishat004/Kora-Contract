@@ -58,4 +58,23 @@ else
   exit 1
 fi
 
+# Dispute escrow must use its explicit budget, including optimized precedence.
+head -c 300 /dev/zero > "$WASM_DIR/kora_access_control.wasm"
+cat << 'EOF' > "$BUDGET_FILE"
+{"budgets":{"access_control":500,"dispute_escrow":600},"default_budget_bytes":1000}
+EOF
+head -c 601 /dev/zero > "$WASM_DIR/kora_dispute_escrow.wasm"
+if bash "$ROOT_DIR/scripts/check-wasm-size.sh" "$BUDGET_FILE" "$WASM_DIR" "" > "$TEST_DIR/escrow.log" 2>&1; then
+  echo "ERROR: over-budget dispute escrow accepted"
+  exit 1
+fi
+head -c 600 /dev/zero > "$WASM_DIR/kora_dispute_escrow.optimized.wasm"
+bash "$ROOT_DIR/scripts/check-wasm-size.sh" "$BUDGET_FILE" "$WASM_DIR" "" > "$TEST_DIR/escrow-optimized.log"
+
+# A missing required artifact must fail even with a size-approval label.
+if REQUIRE_ALL_WASMS=1 bash "$ROOT_DIR/scripts/check-wasm-size.sh" "$BUDGET_FILE" "$WASM_DIR" "wasm-size-increase-approved" > "$TEST_DIR/missing.log" 2>&1; then
+  echo "ERROR: missing required release artifacts accepted"
+  exit 1
+fi
+
 echo "All WASM size budget tests PASSED!"

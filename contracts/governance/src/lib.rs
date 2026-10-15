@@ -21,6 +21,11 @@ pub enum GovernanceError {
     ArithmeticOverflow = 10,
     InvalidVotingMode = 11,
     ResultAlreadyAnchored = 12,
+    NotEligibleForFastTrack = 13,
+    NoBugBountyReportLinked = 14,
+    ProposalTooLarge = 15,
+    FastTrackTimelockNotElapsed = 16,
+    FastTrackThresholdNotMet = 17,
 }
 
 #[contracttype]
@@ -104,6 +109,12 @@ pub enum DataKey {
     StakedBalance(Address),
     TargetCurrentHash(Address),
     OffchainResult(u64),
+    FastTrackEnabled,
+    FastTrackThresholdBps,
+    FastTrackTimelock,
+    FastTrackMaxProposalSize,
+    BugBountyReportSeverity(u64),
+    FastTrackProposal(u64),
 }
 
 #[contract]
@@ -604,94 +615,62 @@ impl GovernanceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
-    use soroban_sdk::Env;
+    use soroban_sdk::testutils::{Address as _, Ledger};
 
-    #[test]
-    fn test_governance_flow() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let acc_control = Address::generate(&env);
-        let target = Address::generate(&env);
-        let voter1 = Address::generate(&env);
-
-        GovernanceContract::initialize(
-            env.clone(),
-            admin.clone(),
-            acc_control,
-            100,
-            500,
-            5000,
-            86400,
-        ).unwrap();
-
-        GovernanceContract::set_stake(env.clone(), voter1.clone(), 1000).unwrap();
-
-        let action_hash = BytesN::from_array(&env, &[1u8; 32]);
-        let prop_id = GovernanceContract::create_proposal(env.clone(), voter1.clone(), target.clone(), action_hash.clone()).unwrap();
-
-        GovernanceContract::vote(env.clone(), voter1.clone(), prop_id, true).unwrap();
-        GovernanceContract::execute_proposal(env.clone(), prop_id).unwrap();
-
-        let prop: GovProposal = env.storage().persistent().get(&DataKey::Proposal(prop_id)).unwrap();
-        assert_eq!(prop.status, ProposalStatus::Executed);
-    }
-
-    #[test]
-    fn offchain_path_anchors_once_and_executes_anchored_tally() {
+    fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set(LedgerInfo {
-            timestamp: 100,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
+        let id = env.register_contract(None, GovernanceContract);
         let admin = Address::generate(&env);
         let voter = Address::generate(&env);
         let target = Address::generate(&env);
-        GovernanceContract::initialize(
-            env.clone(),
-            admin.clone(),
-            Address::generate(&env),
-            1,
-            10,
-            5_000,
-            10,
-        ).unwrap();
-        GovernanceContract::set_stake(env.clone(), voter.clone(), 100).unwrap();
-        let proposal_id = GovernanceContract::create_proposal(
-            env.clone(),
-            voter.clone(),
-            target,
-            BytesN::from_array(&env, &[1u8; 32]),
-        ).unwrap();
-        GovernanceContract::designate_offchain_voting(env.clone(), proposal_id).unwrap();
-        assert!(GovernanceContract::vote(env.clone(), voter, proposal_id, true).is_err());
+        let client = GovernanceContractClient::new(&env, &id);
+        client.initialize(&admin, &Address::generate(&env), &1, &10, &5_000, &10);
+        client.set_stake(&voter, &100);
+        (env, id, voter, target)
+    }
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 110,
-            protocol_version: 21,
-            sequence_number: 2,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
-        let hash = BytesN::from_array(&env, &[2u8; 32]);
-        GovernanceContract::anchor_offchain_result(env.clone(), proposal_id, 100, 0, hash.clone()).unwrap();
-        assert!(GovernanceContract::anchor_offchain_result(
-            env.clone(), proposal_id, 100, 0, hash.clone()
-        ).is_err());
-        GovernanceContract::execute_proposal(env.clone(), proposal_id).unwrap();
-        let result = GovernanceContract::get_offchain_result(env.clone(), proposal_id).unwrap();
-        assert_eq!(result.summary_hash, hash);
-        let proposal: GovProposal = env.storage().persistent().get(&DataKey::Proposal(proposal_id)).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Executed);
+    #[test]
+    fn standard_proposal_executes_once() {
+        let (env, id, voter, target) = setup();
+        let client = GovernanceContractClient::new(&env, &id);
+        let proposal = client.create_proposal(&voter, &target, &BytesN::from_array(&env, &[1; 32]));
+        client.vote(&voter, &proposal, &true);
+        assert!(client.try_vote(&voter, &proposal, &true).is_err());
+        env.ledger().with_mut(|info| info.timestamp += 10);
+        client.execute_proposal(&proposal);
+        client.execute_proposal(&proposal);
+        assert_eq!(client.get_proposal(&proposal).status, ProposalStatus::Executed);
+    }
+
+    #[test]
+    fn offchain_result_is_anchored_once() {
+        let (env, id, voter, target) = setup();
+        let client = GovernanceContractClient::new(&env, &id);
+        let proposal = client.create_proposal(&voter, &target, &BytesN::from_array(&env, &[1; 32]));
+        client.designate_offchain_voting(&proposal);
+        assert!(client.try_vote(&voter, &proposal, &true).is_err());
+        let hash = BytesN::from_array(&env, &[2; 32]);
+        assert!(client.try_anchor_offchain_result(&proposal, &100, &0, &hash).is_err());
+        env.ledger().with_mut(|info| info.timestamp += 10);
+        client.anchor_offchain_result(&proposal, &100, &0, &hash);
+        assert!(client.try_anchor_offchain_result(&proposal, &100, &0, &hash).is_err());
+        client.execute_proposal(&proposal);
+        assert_eq!(client.get_offchain_result(&proposal).unwrap().summary_hash, hash);
+    }
+
+    #[test]
+    fn fast_track_is_disabled_until_configured() {
+        let (env, id, voter, target) = setup();
+        let client = GovernanceContractClient::new(&env, &id);
+        assert!(client
+            .try_create_fast_track_proposal(
+                &voter,
+                &target,
+                &BytesN::from_array(&env, &[1; 32]),
+                &1,
+                &100,
+            )
+            .is_err());
     }
 }

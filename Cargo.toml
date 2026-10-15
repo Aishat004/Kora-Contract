@@ -13,6 +13,10 @@ members = [
     "contracts/price_oracle",
     "contracts/tranche",
     "contracts/dispute_resolution",
+    "contracts/dispute_escrow",
+    "contracts/governance",
+    "contracts/governance_voting",
+    "contracts/parameter_registry",
     "contracts/fractionalizer",
     "contracts/tests",
     "contracts/xtask",
@@ -24,7 +28,9 @@ exclude = ["contracts/fuzz/fuzz"]
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+# Keep host-only test utilities in dev-dependencies and the native fuzz crate.
+# Enabling them here also enables them in deployable WASM packages.
+soroban-sdk = { version = "21.0.0" }
 
 [profile.release]
 opt-level = "z"

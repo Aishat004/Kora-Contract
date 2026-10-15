@@ -1,6 +1,6 @@
 # kora-fuzz
 
-Structured fuzzing for every public entry point of the seven Kora contracts.
+Structured fuzzing for Kora contract entry points and dispute state transitions.
 Feeds randomised-but-structurally-valid call sequences through the generated
 Soroban clients, hunting for panics, unchecked overflows, and unexpected
 `Ok` on invalid input.
@@ -42,7 +42,31 @@ cd contracts/fuzz/fuzz && cargo +nightly fuzz run fuzz_marketplace
 
 Targets: `fuzz_access_control`, `fuzz_invoice_nft`, `fuzz_marketplace`,
 `fuzz_financing_pool`, `fuzz_treasury`, `fuzz_risk_registry`,
-`fuzz_price_oracle`.
+`fuzz_price_oracle`, `fuzz_marketplace_fee`, `fuzz_dispute_resolution`.
+
+### Dispute state transitions (#919)
+
+`fuzz_dispute_resolution` compares every persisted dispute field against an
+independent state model after every operation, including failed calls. It uses
+a registered access-control mock with signer and pause controls, plus the real
+dispute escrow and token contracts with a mock pool to check balances and
+single release. The resolution and escrow APIs remain independent.
+
+Each opcode occupies four bytes: operation (modulo 10), invoice (modulo 4),
+actor/auth selector, argument. Actors 0–3 are admin, governance signer/investor,
+payer/challenger, and outsider; actor bit 7 removes authentication. Operations
+0–9 are open, evidence, resolve, advance time, configure fixture, open escrow,
+adjudicate escrow, timeout refund, repeat initialization, and read. Up to 24
+operations run per input. See [coverage and seed details](../../docs/dispute-fuzz.md).
+
+The default test suite replays the dispute corpus and 32 deterministic random
+walks; the ignored smoke entry runs `FUZZ_ITERS` iterations. For deep fuzzing,
+pass the same seed directory explicitly:
+
+```sh
+cd contracts/fuzz/fuzz
+cargo +nightly fuzz run fuzz_dispute_resolution ../corpus/dispute_resolution
+```
 
 ## When a finding is reported
 

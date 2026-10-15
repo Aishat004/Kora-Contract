@@ -10,6 +10,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- **#912 / #911 Governance and escrow CI onboarding** — include governance, governance voting, parameter registry, and dispute escrow in workspace validation, WASM budgets, optimization, metrics, and release hashes. Escrow deployment is opt-in pending production financing-pool callback integration.
+- **#919 Dispute state-machine fuzzing** — add exact-error transition modeling, authorization and terminal-state checks, escrow custody invariants with a mock pool, regression seeds, and bounded CI smoke coverage. Runtime validation remains pending.
 - **Security Hardening Wave** — comprehensive security improvements across the protocol:
   - **Economic attack simulation harness** — 15 test scenarios modeling fund-refund gaming, referral self-dealing, insurance pool timing manipulation, and concentration cap bypass attempts. All attacks verified unprofitable (<1% ROI). See `contracts/tests/economic-sim/` and `docs/SECURITY_HARDENING_SUMMARY.md`.
   - **Security-relevant Clippy lints** — 18 lints enforced covering arithmetic safety (prevent overflow), panic safety (prevent DoS), unsafe safety (require documentation), and logic correctness (prevent silent failures). See `docs/SECURITY_LINTS.md` and workspace `Cargo.toml`.

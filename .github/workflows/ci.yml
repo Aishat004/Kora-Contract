@@ -10,6 +10,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Validation follows stable to support the v4 lockfile. Release reproducibility
+# continues to use the separately pinned toolchain in rust-toolchain.toml.
+
 jobs:
   # ── Type-check all contracts ──────────────────────────────────────────────
   check:
@@ -21,7 +24,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
@@ -38,7 +41,7 @@ jobs:
         run: cargo check --workspace
 
       - name: cargo check (wasm32)
-        run: cargo check --workspace --target wasm32-unknown-unknown --exclude kora-tests
+        run: cargo check --workspace --target wasm32-unknown-unknown --exclude kora-tests --exclude kora-fuzz --exclude kora-xtask
 
   # ── Lint ──────────────────────────────────────────────────────────────────
   clippy:
@@ -50,7 +53,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo registry
@@ -76,7 +79,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
           components: rustfmt
 
       - name: cargo fmt --check
@@ -116,7 +119,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -161,7 +164,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -186,7 +189,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -201,6 +204,48 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  governance-contract-tests:
+    name: test ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        package:
+          - kora-governance
+          - kora-governance-voting
+          - kora-parameter-registry
+          - kora-dispute-escrow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ matrix.package }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-${{ matrix.package }}-
+      - name: Run contract unit tests
+        run: cargo test -p ${{ matrix.package }}
+
+  dispute-fuzz-smoke:
+    name: dispute state machine fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run bounded opcode sequences
+        env:
+          FUZZ_ITERS: "100"
+        run: cargo test -p kora-fuzz --test smoke fuzz_dispute_resolution -- --ignored
+
   # ── Code coverage gate (issue #643) ──────────────────────────────────────
   #
   # Measures code coverage using cargo-tarpaulin with a minimum threshold
@@ -214,7 +259,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -249,7 +294,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.75"
+          toolchain: stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -279,11 +324,3 @@ jobs:
 
       - name: Validate TTL keeper script
         run: ./scripts/test-ttl-keeper.sh
-
-  # ── Reproducible build verification (issue #645) ─────────────────────────
-  #
-  # Validates that WASM binaries are built reproducibly. This ensures that
-  # the compiled output is deterministic, which is critical for proving that
-  # deployed contracts match 
-
-/* … truncated 3343 chars — edit only what you need near the top … */

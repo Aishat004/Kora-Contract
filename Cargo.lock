@@ -705,6 +705,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-dispute-escrow"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "kora-dispute-resolution"
 version = "0.1.0"
 dependencies = [
@@ -750,6 +757,8 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "kora-access-control",
+ "kora-dispute-escrow",
+ "kora-dispute-resolution",
  "kora-financing-pool",
  "kora-invoice-nft",
  "kora-marketplace",
@@ -758,6 +767,24 @@ dependencies = [
  "kora-shared",
  "kora-treasury",
  "rand 0.8.5",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "kora-governance"
+version = "0.1.0"
+dependencies = [
+ "kora-shared",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "kora-governance-voting"
+version = "0.1.0"
+dependencies = [
+ "kora-access-control",
+ "kora-shared",
+ "proptest",
  "soroban-sdk",
 ]
 
@@ -783,6 +810,15 @@ dependencies = [
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "kora-parameter-registry"
+version = "0.1.0"
+dependencies = [
+ "kora-access-control",
+ "kora-shared",
  "soroban-sdk",
 ]
 

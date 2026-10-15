@@ -193,3 +193,19 @@ await PublicApiClient.revokeKey(key); // effective immediately
   changelog before removal.
 
 > Out of scope: billing/monetization of API access.
+
+## Governance contract bindings
+
+`KoraClient.accessControl` exposes the existing access-control parameter
+governance methods. It does not expose the separate governance, voting, or
+parameter-registry contracts. Their generated Rust clients and deployment
+inputs are documented in [governance](../contracts/governance/README.md),
+[voting](../contracts/governance_voting/README.md), and
+[parameter registry](../contracts/parameter_registry/README.md).
+
+`tests/governance.test.ts` is currently a Vitest sketch outside the SDK's
+Jest `testMatch`; it neither exercises these three contracts nor runs in
+the configured SDK test command. Their actual unit suites run through the
+Rust CI package matrix. Adding a TypeScript binding and executable SDK
+integration suite remains separate work; this onboarding change does not
+claim that sketch as contract coverage.
