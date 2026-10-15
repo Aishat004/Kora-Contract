@@ -8,6 +8,7 @@ export * from './types/funding';
 export * from './types/admin';
 export * from './types/table';
 export * from './types/marketplace';
+export * from './types/feedback';
 
 // Services
 export * from './services/fxService';
@@ -17,6 +18,7 @@ export * from './services/riskService';
 export * from './services/fundingService';
 export * from './services/adminService';
 export * from './services/marketplaceService';
+export * from './services/feedbackService';
 
 // Contexts
 export * from './context/LocaleContext';
@@ -49,6 +51,7 @@ export * from './components/flows/RepaymentFlow';
 export * from './components/risk/RiskScoreVisualization';
 export * from './components/admin/AdminConsole';
 export * from './components/common/DataTable';
+export * from './components/feedback/CommunityFeedbackLoop';
 
 // Wallet connection
 export * from './wallet/types';
