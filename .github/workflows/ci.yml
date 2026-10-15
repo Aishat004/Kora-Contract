@@ -201,6 +201,9 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: cargo test formal_model
+        run: cargo test -p kora-financing-pool --test formal_model
+
   # ── Code coverage gate (issue #643) ──────────────────────────────────────
   #
   # Measures code coverage using cargo-tarpaulin with a minimum threshold
