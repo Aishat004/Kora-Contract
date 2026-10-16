@@ -18,7 +18,7 @@ pub enum VestingError {
     NotInitialized = 3,
     InvalidAddress = 4,
     InvalidAmount = 5,
-    InvalidSchedule = 6,
+    InvalidVestingSchedule = 6,
     GrantAlreadyExists = 7,
     GrantNotFound = 8,
     InsufficientVestedBalance = 9,
@@ -90,31 +90,6 @@ impl VestingContract {
         Ok(())
     }
 
-    /// Create a new vesting grant for a beneficiary.
-    pub fn create_grant(
-        env: Env,
-        admin: Address,
-        beneficiary: Address,
-        total_amount: i128,
-        start_time: u64,
-        cliff_duration: u64,
-        vesting_duration: u64,
-    ) -> Result<(), VestingError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        require_not_self(&env, &beneficiary)?;
-        require_non_negative_amount(total_amount)?;
-
-        if total_amount <= 0 {
-            return Err(VestingError::InvalidAmount);
-        }
-        if vesting_duration <= cliff_duration {
-            return Err(VestingError::InvalidSchedule);
-        }
-
-        let key = DataKey::Grant(beneficiary.clone());
-        if env.storage().persistent().has(&key) {
-            return Err(
     /// Create a new vesting grant for a beneficiary. Admin only.
     ///
     /// **Parameters:**
@@ -130,6 +105,7 @@ impl VestingContract {
     /// - `VestingError::InvalidAmount` — total_amount ≤ 0.
     /// - `VestingError::InvalidVestingSchedule` — vesting_duration ≤ cliff_duration.
     /// - `VestingError::InvalidAddress` — beneficiary is contract address.
+    /// - `VestingError::GrantAlreadyExists` — a grant already exists for this beneficiary.
     ///
     /// **Security:** Requires `admin.require_auth()`. Tokens must be transferred
     /// to contract separately before creating grants.
@@ -144,6 +120,7 @@ impl VestingContract {
     ) -> Result<(), VestingError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        require_non_negative_amount(total_amount)?;
 
         if total_amount <= 0 {
             return Err(VestingError::InvalidAmount);
@@ -151,7 +128,12 @@ impl VestingContract {
         if vesting_duration <= cliff_duration {
             return Err(VestingError::InvalidVestingSchedule);
         }
-        kora_shared::validation::require_not_self(&env, &beneficiary)?;
+        require_not_self(&env, &beneficiary)?;
+
+        let key = DataKey::Grant(beneficiary.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(VestingError::GrantAlreadyExists);
+        }
 
         let grant = VestingGrant {
             beneficiary: beneficiary.clone(),
@@ -161,10 +143,9 @@ impl VestingContract {
             cliff_duration,
             vesting_duration,
             revoked: false,
-            revoked_at: 0,
+            revoked_at: None,
         };
 
-        let key = DataKey::Grant(beneficiary.clone());
         env.storage().persistent().set(&key, &grant);
         Self::bump_persistent(&env, &key);
 
@@ -253,7 +234,7 @@ impl VestingContract {
         }
 
         grant.revoked = true;
-        grant.revoked_at = env.ledger().timestamp();
+        grant.revoked_at = Some(env.ledger().timestamp());
 
         env.storage().persistent().set(&key, &grant);
         Self::bump_persistent(&env, &key);
