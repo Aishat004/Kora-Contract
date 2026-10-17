@@ -90,6 +90,23 @@ smoke!(fuzz_financing_pool, "financing_pool", kora_fuzz::targets::financing_pool
 smoke!(fuzz_treasury, "treasury", kora_fuzz::targets::treasury::run, 0x7EA5);
 smoke!(fuzz_risk_registry, "risk_registry", kora_fuzz::targets::risk_registry::run, 0x815C);
 smoke!(fuzz_price_oracle, "price_oracle", kora_fuzz::targets::price_oracle::run, 0x0AC1);
+smoke!(fuzz_dispute_resolution, "dispute_resolution", kora_fuzz::targets::dispute_resolution::run, 0xD159);
+
+#[test]
+fn dispute_invariants_ci_corpus_replay() {
+    replay_corpus("dispute_resolution", kora_fuzz::targets::dispute_resolution::run);
+}
+
+#[test]
+fn dispute_invariants_ci_bounded_random_walk() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xD159_C1);
+    let mut buf = [0u8; 4 * kora_fuzz::MAX_OPS];
+    for i in 0..32 {
+        rng.fill_bytes(&mut buf);
+        check_once("dispute_resolution", kora_fuzz::targets::dispute_resolution::run,
+            &buf, &format!("ci_dispute_random_walk iter={i}/32"));
+    }
+}
 
 // ── CI-bounded fee invariant tests ────────────────────────────────────────────
 //
@@ -138,4 +155,46 @@ fn fee_invariants_ci_seed_cases() {
     // Run the hand-crafted seed cases defined in the harness itself.
     kora_fuzz::targets::marketplace_fee::assert_fee_seeds_representative();
     kora_fuzz::targets::marketplace_fee::assert_fee_seeds_tier_breakpoints();
+}
+
+// ── Issue #918: secondary_market buy_position CEI ordering ───────────────────
+//
+// Full fuzz smoke target (--ignored; driven by CI `dispute-fuzz-smoke`-style job
+// or `make fuzz`).  Asserts INV-SM-1 through INV-SM-4 across all op sequences.
+smoke!(
+    fuzz_secondary_market,
+    "secondary_market",
+    kora_fuzz::targets::secondary_market::run,
+    0x5EC0
+);
+
+/// CI-bounded (non-ignored) smoke test for secondary_market CEI invariants.
+///
+/// Runs 200 iterations with a seeded RNG so it completes in < 1 s on CI.
+/// The full smoke harness (`fuzz_secondary_market`, --ignored) runs 10_000.
+#[test]
+fn secondary_market_cei_ci_bounded() {
+    use rand::{RngCore, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5EC0_CEI1);
+    let mut buf = [0u8; 256];
+    let n = std::env::var("CI_SM_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200usize);
+    for i in 0..n {
+        let len = 8 + (rng.next_u32() as usize % (buf.len() - 8));
+        rng.fill_bytes(&mut buf[..len]);
+        check_once(
+            "secondary_market",
+            kora_fuzz::targets::secondary_market::run,
+            &buf[..len],
+            &format!("ci_sm_cei iter={i}/{n}"),
+        );
+    }
+}
+
+/// Replay corpus entries for secondary_market (no --ignored gate).
+#[test]
+fn secondary_market_cei_corpus_replay() {
+    replay_corpus("secondary_market", kora_fuzz::targets::secondary_market::run);
 }

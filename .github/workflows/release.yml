@@ -178,7 +178,7 @@ jobs:
         id: compare
         run: |
           CANONICAL_HASHES="canonical/releases/${{ env.VERSION }}.hashes"
-          CONTRACTS=(access_control invoice_nft marketplace financing_pool treasury risk_registry price_oracle)
+          CONTRACTS=(access_control invoice_nft marketplace financing_pool treasury risk_registry price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry)
           PASS=true
           REPORT=""
 

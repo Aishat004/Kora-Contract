@@ -348,6 +348,8 @@ If manipulation detected:
 
 ## References
 
+- [Dispute state-machine fuzzing and coverage gaps](dispute-fuzz.md) uses the
+  same principle of checking rejected operations leave observable state intact.
 - Original issue: "Build adversarial test suite for price_oracle manipulation scenarios"
 - Related contracts: `price_oracle`, `marketplace`, `financing_pool`
 - Security model: Admin-selected honest-majority feeders

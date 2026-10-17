@@ -669,6 +669,32 @@ pub fn action_executed(env: &Env, proposal_id: u64, executor: &Address) {
     );
 }
 
+/// Emitted during multisig proposal execution when one or more recorded voters
+/// are no longer in the current signer set (issue #915).
+///
+/// Schema: (proposal_id, executor, discarded_count, valid_count, timestamp)
+/// - `discarded_count` — number of approvals dropped because the voter was removed from the signer set.
+/// - `valid_count`     — number of approvals that remain valid against the current signer set.
+pub fn stale_votes_discarded(
+    env: &Env,
+    proposal_id: u64,
+    executor: &Address,
+    discarded_count: u32,
+    valid_count: u32,
+) {
+    emit(
+        env,
+        symbol_short!("MS_STALE"),
+        (
+            proposal_id,
+            executor.clone(),
+            discarded_count,
+            valid_count,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Refund Events ────────────────────────────────────────────────────────────
 
 /// Schema: (actor=investor, invoice_id, amount, timestamp)
@@ -1401,6 +1427,42 @@ pub fn listing_amended(
             new_deadline,
             env.ledger().timestamp(),
         ),
+    );
+}
+
+/// Schema: (actor=admin, timestamp).
+pub fn registry_param_initialized(env: &Env, admin: &Address) {
+    emit(
+        env,
+        symbol_short!("REG_INIT"),
+        (admin.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=proposer, parameter_key, new_value, timestamp).
+pub fn param_update_proposed(env: &Env, proposer: &Address, key: u32, value: i128) {
+    emit(
+        env,
+        symbol_short!("PAR_PROP"),
+        (proposer.clone(), key, value, env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=approver, proposal_id, approval_count, timestamp).
+pub fn param_update_approved(env: &Env, approver: &Address, proposal_id: u64, approvals: u32) {
+    emit(
+        env,
+        symbol_short!("PAR_APRV"),
+        (approver.clone(), proposal_id, approvals, env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=executor, parameter_key, old_value, new_value, timestamp).
+pub fn param_updated(env: &Env, executor: &Address, key: u32, old_value: i128, new_value: i128) {
+    emit(
+        env,
+        symbol_short!("PAR_EXEC"),
+        (executor.clone(), key, old_value, new_value, env.ledger().timestamp()),
     );
 }
 

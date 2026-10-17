@@ -62,6 +62,27 @@ Read, in order:
    `KoraError` enum is the master error registry; `kora-xtask
    check-error-variants` (see below) keeps it honest.
 
+### Governance and escrow contract inventory
+
+These contracts are workspace members and participate in workspace formatting,
+linting, and tests. CI also runs their unit tests separately with at most two
+matrix jobs in parallel (issues #912 and #911).
+
+| Directory | Cargo package | Typed Rust client |
+| --- | --- | --- |
+| `contracts/governance` | `kora-governance` | `GovernanceContractClient` |
+| `contracts/governance_voting` | `kora-governance-voting` | `GovernanceVotingContractClient` |
+| `contracts/parameter_registry` | `kora-parameter-registry` | `ParameterRegistryContractClient` |
+| `contracts/dispute_escrow` | `kora-dispute-escrow` | `DisputeEscrowContractClient` |
+
+The governance crates depend on shared types and (for voting and registry)
+access control; they do not depend on each other. Parameter registry is an
+on-chain contract even when its values are queried by off-chain services.
+All four release WASM artifacts are covered by the size-budget gate. See each
+contract README for address configuration and use `cargo +stable test -p
+<package>` to isolate its unit tests. No compile or test results are claimed
+by the #912/#911 onboarding change; verification was restricted to static review.
+
 ### Before you touch code
 
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) covers commit conventions, branching

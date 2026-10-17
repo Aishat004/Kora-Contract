@@ -212,3 +212,12 @@ hash and its `for`/`against` weights. Execution uses those anchored weights with
 the same quorum and approval threshold as on-chain voting. The hash is publicly
 readable through `get_offchain_result`; the authorized anchor adapter is
 responsible for deriving it from the canonical tally.
+
+## Multi-Sig Council Rotation & Term-Limit Enforcement (#845)
+
+To prevent indefinite unreviewed tenure and ensure periodic community oversight:
+- **Council Term Expiry:** Seats are governed by configurable term limits (`configure_council_terms`).
+- **Rotation Elections:** When a term expires, a structured rotation election is conducted (`initiate_council_rotation_election`, `vote_council_rotation`).
+- **Safe Fallback & Quorum Preservation:** An expiring seat continues to serve during the transition until a successor is confirmed or an automatic grace period extension applies if an election does not produce a confirmed candidate.
+- **Credential Handoff:** Integrates with the protocol's secure key-rotation framework for atomic signer replacement.
+

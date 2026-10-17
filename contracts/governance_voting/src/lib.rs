@@ -1,12 +1,6 @@
 #![no_std]
 
-use kora_access_control::AccessControlContractClient;
-use kora_shared::{
-    errors::CommonError,
-    events,
-    reentrancy::ReentrancyGuard,
-    validation::require_non_negative_amount,
-};
+use kora_shared::errors::CommonError;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec,
 };
@@ -750,6 +744,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -766,6 +761,7 @@ mod tests {
     #[test]
     fn test_delegation() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -794,6 +790,7 @@ mod tests {
     #[test]
     fn test_revoke_delegation() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -821,6 +818,7 @@ mod tests {
     #[test]
     fn test_circular_delegation_prevented() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -842,6 +840,7 @@ mod tests {
     #[test]
     fn test_create_proposal_standard_voting() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -870,6 +869,7 @@ mod tests {
     #[test]
     fn test_quadratic_voting_only_for_sentiment() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -909,6 +909,7 @@ mod tests {
     #[test]
     fn test_standard_voting() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -940,6 +941,7 @@ mod tests {
     #[test]
     fn test_quadratic_voting() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -985,6 +987,7 @@ mod tests {
     #[test]
     fn test_already_voted() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -1018,6 +1021,7 @@ mod tests {
     #[test]
     fn test_delegation_then_direct_vote_precedence() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -1159,6 +1163,7 @@ mod tests {
     #[test]
     fn test_self_delegation_fails() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 
@@ -1176,6 +1181,7 @@ mod tests {
     #[test]
     fn test_delegation_without_voting_weight() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, GovernanceVotingContract);
         let client = GovernanceVotingContractClient::new(&env, &contract_id);
 

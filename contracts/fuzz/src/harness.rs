@@ -18,6 +18,8 @@ use kora_price_oracle::{PriceOracleContract, PriceOracleContractClient};
 use kora_risk_registry::{RiskRegistryContract, RiskRegistryContractClient};
 use kora_treasury::{TreasuryContract, TreasuryContractClient};
 
+pub mod dispute;
+
 pub struct Protocol<'a> {
     pub env: Env,
     pub access_control: AccessControlContractClient<'a>,

@@ -36,7 +36,7 @@ use kora_shared::{
     errors::KoraError,
     events,
     types::{RegistryParam, RegistryParamKey},
-    validation::{require_non_zero_amount, require_valid_fee_bps, UPGRADE_TIMELOCK_DELAY},
+    validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec,
@@ -227,7 +227,7 @@ impl ParameterRegistryContract {
             updated_at: now,
             updated_by: by.clone(),
         };
-        env.storage().persistent().set(&DataKey::Param(key), &param);
+        env.storage().persistent().set(&DataKey::Param(key.clone()), &param);
         env.storage().persistent().extend_ttl(
             &DataKey::Param(key),
             PERSISTENT_TTL_THRESHOLD,
@@ -657,7 +657,7 @@ impl ParameterRegistryContract {
         let ac_addr: Option<Address> = env.storage().instance().get(&DataKey::AccessControl);
         if let Some(ref ac) = ac_addr {
             let ac_client = kora_access_control::AccessControlContractClient::new(env, ac);
-            if let Ok(Some(cfg)) = ac_client.try_get_multisig_config() {
+            if let Ok(Ok(cfg)) = ac_client.try_get_multisig_config() {
                 // Caller must be in the signer set.
                 for signer in cfg.signers.iter() {
                     if signer == *caller {
@@ -675,7 +675,7 @@ impl ParameterRegistryContract {
         let ac_addr: Option<Address> = env.storage().instance().get(&DataKey::AccessControl);
         if let Some(ref ac) = ac_addr {
             let ac_client = kora_access_control::AccessControlContractClient::new(env, ac);
-            if let Ok(Some(cfg)) = ac_client.try_get_multisig_config() {
+            if let Ok(Ok(cfg)) = ac_client.try_get_multisig_config() {
                 return Some(cfg.threshold);
             }
         }
@@ -688,7 +688,7 @@ impl ParameterRegistryContract {
             let ac_client = kora_access_control::AccessControlContractClient::new(env, ac);
             return ac_client.try_get_multisig_config()
                 .ok()
-                .and_then(|r| r)
+                .and_then(Result::ok)
                 .is_some();
         }
         false
@@ -778,7 +778,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
 
-    fn setup() -> (Env, ParameterRegistryContractClient<'static>, Address) {
+    fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().set(LedgerInfo {
@@ -795,12 +795,13 @@ mod tests {
         let id = env.register_contract(None, ParameterRegistryContract);
         let client = ParameterRegistryContractClient::new(&env, &id);
         client.initialize(&admin, &None);
-        (env, client, admin)
+        (env, id, admin)
     }
 
     #[test]
     fn test_initialize_bootstraps_defaults() {
-        let (_env, client, _admin) = setup();
+        let (env, id, _admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         // marketplace fee default = 50 bps
         let fee = client.get_value(&RegistryParamKey::MarketplaceFeeBps);
         assert_eq!(fee, 50);
@@ -814,7 +815,8 @@ mod tests {
 
     #[test]
     fn test_admin_set_parameter_updates_value() {
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         client.admin_set_parameter(&admin, &RegistryParamKey::MarketplaceFeeBps, &100);
         let fee = client.get_value(&RegistryParamKey::MarketplaceFeeBps);
         assert_eq!(fee, 100);
@@ -822,7 +824,8 @@ mod tests {
 
     #[test]
     fn test_admin_set_parameter_rejects_out_of_bounds() {
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let result = client.try_admin_set_parameter(
             &admin,
             &RegistryParamKey::MarketplaceFeeBps,
@@ -833,7 +836,8 @@ mod tests {
 
     #[test]
     fn test_governance_proposal_lifecycle_without_multisig() {
-        let (env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         // In admin-only mode, propose/approve/execute all work with admin as the signer.
         let proposal_id = client.propose_param_update(
             &admin,
@@ -861,7 +865,8 @@ mod tests {
 
     #[test]
     fn test_execute_before_timelock_fails() {
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let proposal_id = client.propose_param_update(
             &admin,
             &RegistryParamKey::LatePenaltyBps,
@@ -874,7 +879,8 @@ mod tests {
 
     #[test]
     fn test_cancel_proposal() {
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let proposal_id = client.propose_param_update(
             &admin,
             &RegistryParamKey::LatePenaltyBps,
@@ -887,7 +893,8 @@ mod tests {
 
     #[test]
     fn test_double_approval_rejected() {
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let proposal_id = client.propose_param_update(
             &admin,
             &RegistryParamKey::LatePenaltyBps,
@@ -900,9 +907,9 @@ mod tests {
 
     #[test]
     fn test_get_values_batch() {
-        let (_env, client, _admin) = setup();
+        let (env, id, _admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let keys = {
-            let env = Env::default();
             let mut v = Vec::new(&env);
             v.push_back(RegistryParamKey::MarketplaceFeeBps);
             v.push_back(RegistryParamKey::LatePenaltyBps);
@@ -917,7 +924,8 @@ mod tests {
         // A consuming contract holds a cached value. After a parameter update
         // (simulated via admin_set_parameter), calling get_value returns the
         // new value — confirming the registry is the single source of truth.
-        let (_env, client, admin) = setup();
+        let (env, id, admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         let cached = client.get_value(&RegistryParamKey::MarketplaceFeeBps);
         assert_eq!(cached, 50);
 
@@ -934,7 +942,8 @@ mod tests {
     fn test_backward_compat_zero_default_for_unknown_key() {
         // Consuming contracts that call get_value for a key not yet bootstrapped
         // receive 0 (not an error) — enabling graceful migration.
-        let (_env, client, _admin) = setup();
+        let (env, id, _admin) = setup();
+        let client = ParameterRegistryContractClient::new(&env, &id);
         // MinimumVerifierStake is bootstrapped, so this just verifies non-zero default.
         let val = client.get_value(&RegistryParamKey::MinimumVerifierStake);
         assert!(val > 0);

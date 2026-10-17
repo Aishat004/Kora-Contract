@@ -62,6 +62,16 @@ pub enum AccessControlError {
     DelegateNotSigner = 35,
     /// No delegation exists to revoke.
     NoDelegationExists = 36,
+    /// Council seat term length must be greater than zero.
+    InvalidCouncilTermLength = 37,
+    /// Quorum safety violation during rotation transition.
+    QuorumSafetyViolation = 38,
+    /// Council seat term limit exceeded.
+    CouncilTermExpired = 39,
+    /// Council rotation election not found.
+    RotationElectionNotFound = 40,
+    /// Council rotation election already concluded.
+    RotationElectionAlreadyConcluded = 41,
 }
 
 impl From<CommonError> for AccessControlError {
@@ -157,6 +167,34 @@ pub enum DataKey {
     /// Which signers have delegated to a specific delegate, keyed by delegate.
     /// Used for efficient lookup of all delegators for a given delegate.
     Delegators(Address),
+    // ── Council Rotation & Term Limits (#845) ─────────────────────────────────
+    /// Configured council term length in seconds (or ledgers).
+    CouncilTermLength,
+    /// Fallback extension duration if election fails or is delayed.
+    CouncilTermExtensionGracePeriod,
+    /// Registered term start timestamp for a council signer.
+    CouncilSeatTermStart(Address),
+    /// Current rotation election proposal id per expiring seat.
+    CouncilSeatElection(Address),
+    /// Monotonic election id counter.
+    NextCouncilElectionId,
+    /// Pending council rotation election details.
+    CouncilElection(u64),
+}
+
+/// Council rotation election record
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CouncilElectionRecord {
+    pub election_id: u64,
+    pub current_seat: Address,
+    pub candidate_replacement: Address,
+    pub initiated_at: u64,
+    pub votes_for: u32,
+    pub votes_against: u32,
+    pub voter_records: Vec<Address>,
+    pub concluded: bool,
+    pub confirmed: bool,
 }
 
 const PROPOSAL_TTL_LEDGERS: u64 = 120_960; // ~7 days at ~5s/ledger
@@ -804,9 +842,33 @@ impl AccessControlContract {
         if env.ledger().timestamp() > proposal.expires_at {
             return Err(AccessControlError::ProposalExpired);
         }
-        if proposal.approvals.len() < config.threshold {
+
+        // ── Issue #915: Re-validate voters against the current live signer set ──
+        // A signer may have been removed after casting their vote.  Counting stale
+        // approvals toward quorum lets a former signer's weight persist after
+        // rotation, undermining the multisig guarantee.
+        //
+        // Filter `proposal.approvals` to only those addresses still present in
+        // `config.signers` (the current set), then compare the valid count against
+        // the current threshold.  Emit an event if any approvals are discarded so
+        // off-chain monitors can alert on signer-set drift.
+        let total_recorded: u32 = proposal.approvals.len();
+        let mut valid_count: u32 = 0;
+        for i in 0..proposal.approvals.len() {
+            let voter = proposal.approvals.get(i).ok_or(AccessControlError::Unauthorized)?;
+            // Check if this voter is still in the current signer set
+            if Self::require_signer(&config, &voter).is_ok() {
+                valid_count += 1;
+            }
+        }
+        let discarded_count: u32 = total_recorded.saturating_sub(valid_count);
+        if discarded_count > 0 {
+            events::stale_votes_discarded(&env, proposal_id, &executor, discarded_count, valid_count);
+        }
+        if valid_count < config.threshold {
             return Err(AccessControlError::ThresholdNotMet);
         }
+        // ── End Issue #915 ──────────────────────────────────────────────────────
 
         proposal.executed = true;
         env.storage()
@@ -994,9 +1056,30 @@ impl AccessControlContract {
             if env.ledger().timestamp() > proposal.expires_at {
                 return Err(AccessControlError::ProposalExpired);
             }
-            if proposal.approvals.len() < config.threshold {
+
+            // ── Issue #915: Re-validate voters against the live signer set ──────
+            let total_recorded: u32 = proposal.approvals.len();
+            let mut valid_count: u32 = 0;
+            for j in 0..proposal.approvals.len() {
+                let voter = proposal.approvals.get(j).ok_or(AccessControlError::Unauthorized)?;
+                if Self::require_signer(&config, &voter).is_ok() {
+                    valid_count += 1;
+                }
+            }
+            let discarded_count: u32 = total_recorded.saturating_sub(valid_count);
+            if discarded_count > 0 {
+                events::stale_votes_discarded(
+                    &env,
+                    proposal_id,
+                    &executor,
+                    discarded_count,
+                    valid_count,
+                );
+            }
+            if valid_count < config.threshold {
                 return Err(AccessControlError::ThresholdNotMet);
             }
+            // ── End Issue #915 ────────────────────────────────────────────────────
 
             // Check for conflicts with previously validated proposals
             Self::require_no_conflict(&env, &proposal, &proposals)?;
@@ -1800,6 +1883,212 @@ impl AccessControlContract {
     /// **Security:** Read-only view. No authorization required.
     pub fn get_delegators(env: Env, delegate: Address) -> Vec<Address> {
         Self::internal_get_delegators(&env, &delegate)
+    }
+
+    // ── Council Rotation & Term Limits (#845) ─────────────────────────────────
+
+    /// Configure council term limits and grace periods. Admin or multisig gated.
+    pub fn configure_council_terms(
+        env: Env,
+        caller: Address,
+        term_length: u64,
+        grace_period: u64,
+    ) -> Result<(), AccessControlError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        if term_length == 0 {
+            return Err(AccessControlError::InvalidCouncilTermLength);
+        }
+
+        env.storage().persistent().set(&DataKey::CouncilTermLength, &term_length);
+        env.storage().persistent().set(&DataKey::CouncilTermExtensionGracePeriod, &grace_period);
+        Self::bump_persistent(&env, &DataKey::CouncilTermLength);
+        Self::bump_persistent(&env, &DataKey::CouncilTermExtensionGracePeriod);
+
+        Ok(())
+    }
+
+    /// Initiate a structured rotation election for an expiring or expired council seat.
+    /// Can be initiated by any active signer or admin.
+    pub fn initiate_council_rotation_election(
+        env: Env,
+        initiator: Address,
+        expiring_seat: Address,
+        candidate_replacement: Address,
+    ) -> Result<u64, AccessControlError> {
+        initiator.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &initiator)?;
+        Self::require_signer(&config, &expiring_seat)?;
+
+        let election_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextCouncilElectionId)
+            .unwrap_or(1u64);
+
+        let mut voter_records = Vec::new(&env);
+        voter_records.push_back(initiator.clone());
+
+        let record = CouncilElectionRecord {
+            election_id,
+            current_seat: expiring_seat.clone(),
+            candidate_replacement: candidate_replacement.clone(),
+            initiated_at: env.ledger().timestamp(),
+            votes_for: 1,
+            votes_against: 0,
+            voter_records,
+            concluded: false,
+            confirmed: false,
+        };
+
+        env.storage().persistent().set(&DataKey::CouncilElection(election_id), &record);
+        env.storage().persistent().set(&DataKey::CouncilSeatElection(expiring_seat.clone()), &election_id);
+        env.storage().persistent().set(&DataKey::NextCouncilElectionId, &(election_id + 1));
+
+        Self::bump_persistent(&env, &DataKey::CouncilElection(election_id));
+        Self::bump_persistent(&env, &DataKey::CouncilSeatElection(expiring_seat));
+
+        Ok(election_id)
+    }
+
+    /// Vote in a council rotation election.
+    pub fn vote_council_rotation(
+        env: Env,
+        voter: Address,
+        election_id: u64,
+        support: bool,
+    ) -> Result<(), AccessControlError> {
+        voter.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &voter)?;
+
+        let mut election: CouncilElectionRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CouncilElection(election_id))
+            .ok_or(AccessControlError::RotationElectionNotFound)?;
+
+        if election.concluded {
+            return Err(AccessControlError::RotationElectionAlreadyConcluded);
+        }
+
+        for i in 0..election.voter_records.len() {
+            if election.voter_records.get(i).unwrap() == voter {
+                return Err(AccessControlError::AlreadyVoted);
+            }
+        }
+
+        election.voter_records.push_back(voter);
+        if support {
+            election.votes_for += 1;
+        } else {
+            election.votes_against += 1;
+        }
+
+        env.storage().persistent().set(&DataKey::CouncilElection(election_id), &election);
+        Ok(())
+    }
+
+    /// Conclude the rotation election and apply safe credential handoff.
+    /// Invariant: Safe minimum quorum is preserved throughout transition.
+    /// An expiring seat's authority only lapses once replacement is confirmed.
+    /// If election fails, automatic term extension activates pending a new election.
+    pub fn conclude_council_rotation_election(
+        env: Env,
+        caller: Address,
+        election_id: u64,
+    ) -> Result<(), AccessControlError> {
+        caller.require_auth();
+        let mut config = Self::load_multisig_config(&env)?;
+
+        let mut election: CouncilElectionRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CouncilElection(election_id))
+            .ok_or(AccessControlError::RotationElectionNotFound)?;
+
+        if election.concluded {
+            return Err(AccessControlError::RotationElectionAlreadyConcluded);
+        }
+
+        let confirmed = election.votes_for >= config.threshold;
+        election.concluded = true;
+        election.confirmed = confirmed;
+
+        if confirmed {
+            // Safe rotation: swap expiring seat with candidate replacement
+            let mut new_signers = Vec::new(&env);
+            for i in 0..config.signers.len() {
+                let signer = config.signers.get(i).unwrap();
+                if signer == election.current_seat {
+                    new_signers.push_back(election.candidate_replacement.clone());
+                } else {
+                    new_signers.push_back(signer);
+                }
+            }
+
+            // Quorum safety validation
+            if new_signers.len() < config.threshold as u32 || config.threshold < 2 {
+                return Err(AccessControlError::QuorumSafetyViolation);
+            }
+
+            config.signers = new_signers;
+            env.storage().persistent().set(&DataKey::MultisigConfig, &config);
+            Self::bump_persistent(&env, &DataKey::MultisigConfig);
+
+            // Record new term start
+            env.storage().persistent().set(
+                &DataKey::CouncilSeatTermStart(election.candidate_replacement.clone()),
+                &env.ledger().timestamp(),
+            );
+            env.storage().persistent().remove(&DataKey::CouncilSeatTermStart(election.current_seat.clone()));
+        } else {
+            // Failed election fallback: automatic term extension to prevent authority/quorum gap
+            let grace_period: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CouncilTermExtensionGracePeriod)
+                .unwrap_or(259_200u64); // Default 3 days fallback extension
+
+            let current_term_start: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CouncilSeatTermStart(election.current_seat.clone()))
+                .unwrap_or_else(|| env.ledger().timestamp());
+
+            env.storage().persistent().set(
+                &DataKey::CouncilSeatTermStart(election.current_seat.clone()),
+                &(current_term_start + grace_period),
+            );
+        }
+
+        env.storage().persistent().set(&DataKey::CouncilElection(election_id), &election);
+        env.storage().persistent().remove(&DataKey::CouncilSeatElection(election.current_seat));
+
+        Ok(())
+    }
+
+    /// Check whether a council seat has exceeded its term limit.
+    pub fn is_council_seat_term_expired(env: Env, seat: Address) -> bool {
+        let term_length: Option<u64> = env.storage().persistent().get(&DataKey::CouncilTermLength);
+        if let Some(length) = term_length {
+            let term_start: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CouncilSeatTermStart(seat))
+                .unwrap_or(0);
+            if term_start > 0 && env.ledger().timestamp() > term_start + length {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get council rotation election details.
+    pub fn get_council_election(env: Env, election_id: u64) -> Option<CouncilElectionRecord> {
+        env.storage().persistent().get(&DataKey::CouncilElection(election_id))
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────

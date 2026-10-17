@@ -30,6 +30,9 @@
 # Admin
 #   DEPLOYER_SECRET           Required. Stellar secret key / account alias for the deployer.
 #                             The derived public key is used as the initial admin for all contracts.
+#   DEPLOY_DISPUTE_ESCROW     Optional: true to deploy repayment escrow (default: false).
+#                             Requires pool escrow hooks before custody can be used;
+#                             see docs/dispute-escrow.md.
 #
 # =============================================================================
 
@@ -50,6 +53,11 @@ MARKETPLACE_REFERRER_BPS="${MARKETPLACE_REFERRER_BPS:-0}"
 LATE_PENALTY_BPS="${LATE_PENALTY_BPS:-200}"
 MAX_POSITION_BPS="${MAX_POSITION_BPS:-5000}"
 ORACLE_BASE_CURRENCY="${ORACLE_BASE_CURRENCY:-USDC}"
+DEPLOY_DISPUTE_ESCROW="${DEPLOY_DISPUTE_ESCROW:-false}"
+case "$DEPLOY_DISPUTE_ESCROW" in
+  true|false) ;;
+  *) echo "ERROR: DEPLOY_DISPUTE_ESCROW must be true or false." >&2; exit 1 ;;
+esac
 
 # ── Network config ────────────────────────────────────────────────────────────
 
@@ -165,6 +173,11 @@ echo "  marketplace    : $MARKETPLACE_ID"
 PRICE_ORACLE_ID=$(deploy_contract "price_oracle" "$WASM_DIR/kora_price_oracle.wasm")
 echo "  price_oracle   : $PRICE_ORACLE_ID"
 
+if [ "$DEPLOY_DISPUTE_ESCROW" = "true" ]; then
+  DISPUTE_ESCROW_ID=$(deploy_contract "dispute_escrow" "$WASM_DIR/kora_dispute_escrow.wasm")
+  echo "  dispute_escrow : $DISPUTE_ESCROW_ID"
+fi
+
 echo ""
 echo "--- Initializing contracts (dependency order) ---"
 
@@ -189,6 +202,11 @@ invoke "$POOL_ID" initialize \
   --price_oracle "$PRICE_ORACLE_ID" \
   --max_position_bps "$MAX_POSITION_BPS"
 echo "  financing_pool initialized (late penalty: ${LATE_PENALTY_BPS} bps, max position: ${MAX_POSITION_BPS} bps)"
+
+if [ "$DEPLOY_DISPUTE_ESCROW" = "true" ]; then
+  invoke "$DISPUTE_ESCROW_ID" initialize --admin "$ADMIN" --pool "$POOL_ID"
+  echo "  dispute_escrow initialized; pool escrow hooks must be wired before use"
+fi
 
 invoke "$MARKETPLACE_ID" initialize \
   --admin "$ADMIN" \
@@ -219,6 +237,11 @@ POOL_HASH=$(sha256sum "$WASM_DIR/kora_financing_pool.wasm" | awk '{print $1}')
 MARKETPLACE_HASH=$(sha256sum "$WASM_DIR/kora_marketplace.wasm" | awk '{print $1}')
 RISK_HASH=$(sha256sum "$WASM_DIR/kora_risk_registry.wasm" | awk '{print $1}')
 PRICE_ORACLE_HASH=$(sha256sum "$WASM_DIR/kora_price_oracle.wasm" | awk '{print $1}')
+ESCROW_MANIFEST_ENTRY=""
+if [ "$DEPLOY_DISPUTE_ESCROW" = "true" ]; then
+  DISPUTE_ESCROW_HASH=$(sha256sum "$WASM_DIR/kora_dispute_escrow.wasm" | awk '{print $1}')
+  ESCROW_MANIFEST_ENTRY=", \"dispute_escrow\": {\"address\": \"$DISPUTE_ESCROW_ID\", \"wasm_hash\": \"$DISPUTE_ESCROW_HASH\"}"
+fi
 
 TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -270,6 +293,7 @@ cat > "$TEMP_MANIFEST" <<EOF
       "address": "$PRICE_ORACLE_ID",
       "wasm_hash": "$PRICE_ORACLE_HASH"
     }
+    $ESCROW_MANIFEST_ENTRY
   }
 }
 EOF

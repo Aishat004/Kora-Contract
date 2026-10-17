@@ -55,6 +55,13 @@ const CONTRACTS: &[&str] = &[
     "financing_pool",
     "treasury",
     "risk_registry",
+    "price_oracle",
+    "tranche",
+    "dispute_resolution",
+    "dispute_escrow",
+    "governance",
+    "governance_voting",
+    "parameter_registry",
 ];
 
 /// Synthetic cost-per-byte multiplier used to derive `estimated_cost_units`.
