@@ -103,9 +103,9 @@ impl VestingContract {
     /// **Errors:**
     /// - `VestingError::NotAdmin` — Caller is not the admin.
     /// - `VestingError::InvalidAmount` — total_amount ≤ 0.
-    /// - `VestingError::InvalidVestingSchedule` — vesting_duration ≤ cliff_duration.
+    /// - `VestingError::InvalidSchedule` — vesting_duration ≤ cliff_duration.
     /// - `VestingError::InvalidAddress` — beneficiary is contract address.
-    /// - `VestingError::GrantAlreadyExists` — a grant already exists for this beneficiary.
+    /// - `VestingError::GrantAlreadyExists` — grant already exists for beneficiary.
     ///
     /// **Security:** Requires `admin.require_auth()`. Tokens must be transferred
     /// to contract separately before creating grants.
@@ -364,22 +364,21 @@ impl VestingContract {
         );
     }
 
-    /// Calculate the vested amount for a grant at the current ledger timestamp.
+    /// Calculate the vested amount for a grant at a specific timestamp.
     ///
     /// **Logic:**
     /// - Before cliff: 0
     /// - After cliff, before full vesting: Linear proportion based on time
     /// - After full vesting: total_amount
-    /// - If revoked: freeze calculation at revocation timestamp
-    fn calculate_vested(env: &Env, grant: &VestingGrant) -> Result<i128, VestingError> {
-        let now = env.ledger().timestamp();
-        let effective_time = if grant.revoked {
+    /// - If revoked and revocation happened at or before `at_time`: freeze at revoked_at
+    /// - If revoked but revocation after `at_time`: use `at_time` for historical snapshot
+    fn calculate_vested_at(grant: &VestingGrant, at_time: u64) -> Result<i128, VestingError> {
+        let effective_time = if grant.revoked && grant.revoked_at <= at_time {
             grant.revoked_at
         } else {
-            now
+            at_time
         };
 
-        // Before start time: nothing vested
         if effective_time < grant.start_time {
             return Ok(0);
         }
@@ -388,24 +387,56 @@ impl VestingContract {
             .checked_sub(grant.start_time)
             .ok_or(VestingError::ArithmeticOverflow)?;
 
-        // Before cliff: nothing vested
         if elapsed < grant.cliff_duration {
             return Ok(0);
         }
 
-        // After full vesting duration: everything vested
         if elapsed >= grant.vesting_duration {
             return Ok(grant.total_amount);
         }
 
-        // Linear vesting between cliff and end
-        // vested = total_amount * elapsed / vesting_duration
         let vested = (grant.total_amount as i128)
             .checked_mul(elapsed as i128)
             .and_then(|v| v.checked_div(grant.vesting_duration as i128))
             .ok_or(VestingError::ArithmeticOverflow)?;
 
         Ok(vested)
+    }
+
+    /// Calculate the vested amount for a grant at the current ledger timestamp.
+    ///
+    /// **Logic:**
+    /// - Before cliff: 0
+    /// - After cliff, before full vesting: Linear proportion based on time
+    /// - After full vesting: total_amount
+    /// - If revoked: freeze calculation at revocation timestamp
+    fn calculate_vested(env: &Env, grant: &VestingGrant) -> Result<i128, VestingError> {
+        Self::calculate_vested_at(grant, env.ledger().timestamp())
+    }
+
+    /// Get the vested balance for a beneficiary as of a specific timestamp.
+    ///
+    /// This is the governance snapshot function — it computes the vested amount
+    /// at `at_time` (typically a proposal's `created_at` timestamp) so that
+    /// vote weight reflects the economically locked balance at proposal creation,
+    /// not the current ledger time.
+    ///
+    /// **Parameters:**
+    /// - `beneficiary` — The address to query.
+    /// - `at_time` — The historical timestamp at which to snapshot vesting.
+    ///
+    /// **Returns:** The vested balance at `at_time`. Returns 0 if no grant exists
+    /// or vesting had not started at that time.
+    ///
+    /// **Security:** Read-only view. No auth required.
+    pub fn get_vested_balance_at(env: Env, beneficiary: Address, at_time: u64) -> Result<i128, VestingError> {
+        let key = DataKey::Grant(beneficiary.clone());
+        let grant: VestingGrant = match env.storage().persistent().get(&key) {
+            Some(g) => g,
+            None => return Ok(0),
+        };
+
+        Self::calculate_vested_at(&grant, at_time)
     }
 }
 

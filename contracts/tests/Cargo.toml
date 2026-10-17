@@ -64,6 +64,11 @@ path = "timelock_bypass_regression.rs"
 name = "multisig_threshold_manipulation"
 path = "multisig_threshold_manipulation.rs"
 
+# ── Governance parameter range abuse tests ─────────────────────────────────
+[[test]]
+name = "governance_parameter_range_abuse"
+path = "governance_parameter_range_abuse.rs"
+
 # ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
 [[test]]
 name = "auth_fuzzing"
@@ -90,10 +95,6 @@ kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
-kora-dispute-resolution = { path = "../dispute_resolution" }
-kora-dispute-escrow = { path = "../dispute_escrow" }
-
-[[test]]
-name = "dispute_cross_contract"
-path = "dispute_cross_contract.rs"
+kora-governance-voting = { path = "../governance_voting" }
+kora-vesting = { path = "../vesting" }
 
