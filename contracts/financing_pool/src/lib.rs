@@ -168,6 +168,10 @@ pub enum DataKey {
     Marketplace,
     /// Per-investor auto-compound preference, keyed by investor address (#578)
     AutoCompound(Address),
+    /// Dispute escrow contract address (#895)
+    DisputeEscrow,
+    EscrowPending(u64),
+    EscrowUsed(u64),
 }
 
 /// Investor preference to auto-compound a matured position's payout into a
@@ -475,6 +479,106 @@ impl FinancingPoolContract {
 
     pub fn schema_version(env: Env) -> u32 {
         kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
+    }
+
+    pub fn set_dispute_escrow(env: Env, admin: Address, escrow: Address) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if escrow == env.current_contract_address() { return Err(FinancingPoolError::InvalidAddress); }
+        if env.storage().instance().has(&DataKey::DisputeEscrow) { return Err(FinancingPoolError::AlreadyInitialized); }
+        env.storage().instance().set(&DataKey::DisputeEscrow, &escrow);
+        Ok(())
+    }
+
+    /// Terms are fetched by escrow before collecting the SME's token payment.
+    pub fn escrow_terms(env: Env, invoice_id: u64) -> Result<(Address, Address, i128), FinancingPoolError> {
+        let pool: Pool = env.storage().persistent().get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed { return Err(FinancingPoolError::PoolAlreadyClosed); }
+        let nft: Address = env.storage().instance().get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let invoice = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft).get_invoice(&invoice_id);
+        let remaining = pool.total_owed.checked_sub(pool.repaid_amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        Ok((pool.token, invoice.sme, remaining))
+    }
+
+    pub fn has_position(env: Env, invoice_id: u64, investor: Address) -> bool {
+        let positions: Map<Address, Position> = env.storage().persistent()
+            .get(&DataKey::Positions(invoice_id)).unwrap_or_else(|| Map::new(&env));
+        positions.get(investor).map(|p| p.contributed > 0).unwrap_or(false)
+    }
+
+    /// Escrow-only reservation: while pending, every normal repayment path is blocked.
+    pub fn reserve_escrow(env: Env, escrow: Address, invoice_id: u64, amount: i128) -> Result<(), FinancingPoolError> {
+        Self::require_escrow(&env, &escrow)?;
+        escrow.require_auth();
+        if amount <= 0 { return Err(FinancingPoolError::InvalidAmount); }
+        let key = DataKey::EscrowPending(invoice_id);
+        if env.storage().persistent().has(&key) { return Err(FinancingPoolError::EscrowPending); }
+        let used = DataKey::EscrowUsed(invoice_id);
+        if env.storage().persistent().has(&used) { return Err(FinancingPoolError::DisputeAlreadyOpen); }
+        let pool: Pool = env.storage().persistent().get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed { return Err(FinancingPoolError::PoolAlreadyClosed); }
+        let remaining = pool.total_owed.checked_sub(pool.repaid_amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if amount > remaining { return Err(FinancingPoolError::InvalidAmount); }
+        env.storage().persistent().set(&key, &amount);
+        env.storage().persistent().extend_ttl(&key, 518_400, 518_400);
+        env.storage().persistent().set(&used, &true);
+        env.storage().persistent().extend_ttl(&used, 518_400, 518_400);
+        Ok(())
+    }
+
+    /// Escrow-only callback after its token transfer; an approved payment uses
+    /// the existing pool yield distribution and NFT completion path.
+    pub fn settle_escrow(
+        env: Env, escrow: Address, invoice_id: u64, amount: i128, pay_pool: bool,
+    ) -> Result<(), FinancingPoolError> {
+        Self::require_escrow(&env, &escrow)?;
+        escrow.require_auth();
+        let key = DataKey::EscrowPending(invoice_id);
+        let reserved: i128 = env.storage().persistent().get(&key).ok_or(FinancingPoolError::EscrowPending)?;
+        if reserved != amount { return Err(FinancingPoolError::InvalidAmount); }
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+        env.storage().persistent().set(&DataKey::RepaymentLock(invoice_id), &true);
+        if pay_pool {
+            let mut pool: Pool = env.storage().persistent().get(&DataKey::Pool(invoice_id))
+                .ok_or(FinancingPoolError::PoolNotFound)?;
+            if pool.is_closed { return Err(FinancingPoolError::PoolAlreadyClosed); }
+            pool.repaid_amount = pool.repaid_amount.checked_add(amount)
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+            if pool.repaid_amount > pool.total_owed { return Err(FinancingPoolError::InvalidAmount); }
+            let close = pool.repaid_amount >= pool.total_owed;
+            pool.is_closed = close;
+            env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+            let mut stats: ProtocolStats = env.storage().instance().get(&DataKey::ProtocolStats)
+                .unwrap_or(ProtocolStats { pools_opened: 0, total_repaid: 0, pools_defaulted: 0, active_pools: 0 });
+            stats.total_repaid = stats.total_repaid.saturating_add(amount);
+            if close { stats.active_pools = stats.active_pools.saturating_sub(1); }
+            env.storage().instance().set(&DataKey::ProtocolStats, &stats);
+            events::repayment_made(&env, invoice_id, &escrow, amount);
+            if close {
+                Self::distribute_yield(&env, invoice_id, &pool.token, pool.repaid_amount, pool.face_value)?;
+                let nft: Address = env.storage().instance().get(&DataKey::InvoiceNft)
+                    .ok_or(FinancingPoolError::NotInitialized)?;
+                kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft)
+                    .set_repaid(&env.current_contract_address(), &invoice_id);
+            }
+        }
+        env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
+        Ok(())
+    }
+
+    fn require_escrow(env: &Env, caller: &Address) -> Result<(), FinancingPoolError> {
+        let configured: Address = env.storage().instance().get(&DataKey::DisputeEscrow)
+            .ok_or(FinancingPoolError::EscrowNotConfigured)?;
+        if &configured != caller { return Err(FinancingPoolError::Unauthorized); }
+        Ok(())
     }
 
     /// One-time initialization. Wires up all cross-contract dependencies and configures pool parameters.
@@ -799,6 +903,16 @@ impl FinancingPoolContract {
         Self::require_admin(&env, &caller)?;
         Self::require_not_paused(&env)?;
 
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+        if nft_client.is_invoice_frozen(&invoice_id) {
+            return Err(FinancingPoolError::InvoiceFrozen);
+        }
+
         if contributed <= 0 || total_pool <= 0 {
             return Err(FinancingPoolError::InvalidAmount);
         }
@@ -1079,6 +1193,16 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::NotPositionOwner);
         }
 
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+
+        if let Some(offer) = env.storage().persistent().get::<DataKey, EarlySettlementOffer>(&DataKey::EarlySettlement(invoice_id)) {
+            if offer.accepted.iter().any(|a| a == seller) {
+                return Err(FinancingPoolError::Unauthorized);
+            }
+        }
+
         if env.storage().persistent().has(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index)) {
             return Err(FinancingPoolError::SaleAlreadyListed);
         }
@@ -1114,6 +1238,10 @@ impl FinancingPoolContract {
         Self::require_no_escrow(&env, invoice_id)?;
         buyer.require_auth();
         Self::require_not_paused(&env)?;
+
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
 
         let offer: ShareSaleOffer = env
             .storage()
@@ -3379,6 +3507,47 @@ mod tests {
         assert!(client
             .try_record_position(&admin, &1u64, &investor, &100i128, &0i128)
             .is_err());
+    }
+
+    #[test]
+    fn test_record_position_blocked_when_invoice_frozen() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let nft = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft);
+        nft_client.initialize(&admin);
+
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let ac = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac);
+        ac_client.initialize(&admin);
+        let oracle = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &nft,
+            &rr,
+            &treasury,
+            &ac,
+            &200u32,
+            &oracle,
+            &10_000u32,
+            &0u64,
+            &dispute_resolution,
+        );
+
+        let sme = Address::generate(&env);
+        let invoice_id = nft_client.mint_invoice(&sme, &10_000_000_000i128, &oracle, &1_000_000u64, &oracle);
+        nft_client.freeze_invoice(&admin, &invoice_id);
+
+        let investor = Address::generate(&env);
+        let result = client.try_record_position(&admin, &invoice_id, &investor, &5_000_000_000i128, &10_000_000_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvoiceFrozen);
     }
 
     #[test]
