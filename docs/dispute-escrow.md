@@ -7,9 +7,15 @@ from the existing `dispute_resolution` contract for challenges to defaults.
 
 ## Deployment
 
-1. Deploy `dispute_escrow`; call `initialize(admin, financing_pool)`.
-2. Call `financing_pool.set_dispute_escrow(admin, escrow_address)` once.
-3. Make sure the financing pool is authorized to mark the invoice NFT repaid
+1. Deploy and initialize `dispute_resolution`, then initialize `financing_pool`
+   with its address. The resolution contract handles default challenges and is
+   separate from repayment escrow.
+2. Deploy and initialize `dispute_escrow` with the financing pool address.
+3. Call `financing_pool.set_dispute_escrow(admin, escrow_address)` once,
+   configure `financing_pool.set_marketplace(admin, marketplace_address)`, and
+   apply any nonzero marketplace referral split with
+   `marketplace.set_referrer_split_bps(admin, bps)`.
+4. Make sure the financing pool is authorized to mark the invoice NFT repaid
    and the escrow contract has sufficient ledger lifetime for open disputes.
 
 ## Flow
@@ -55,12 +61,12 @@ recording includes the same artifact. See [performance budgets](PERFORMANCE.md)
 for the provisional-cap rationale; this onboarding did not run builds or
 measure the binary.
 
-`scripts/deploy.sh` uses the exact `kora_dispute_escrow.wasm` filename when
-`DEPLOY_DISPUTE_ESCROW=true` is set (default: false). This is opt-in because
-the current financing pool does not implement the required `escrow_terms`,
-`reserve_escrow`, `settle_escrow`, and `set_dispute_escrow` hooks. Enabling it
-deploys and initializes the escrow and records its address/hash, but pool
-integration must be implemented before using the custody flow above.
+`scripts/deploy.sh` deploys `dispute_resolution` alongside the financing pool
+and deploys repayment escrow by default (`DEPLOY_DISPUTE_ESCROW=true`). It
+initializes the dependencies in order, configures the pool's marketplace and
+escrow addresses, and records deployed contract addresses and WASM hashes in the
+manifest. Set `DEPLOY_DISPUTE_ESCROW=false` only when intentionally omitting the
+repayment custody flow.
 
 ### State-machine fuzzing (#919)
 
