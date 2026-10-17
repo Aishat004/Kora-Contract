@@ -18,6 +18,9 @@ pub mod marketplace;
 pub mod marketplace_fee;
 pub mod price_oracle;
 pub mod risk_registry;
+/// Fuzz harness for secondary_market::buy_position CEI ordering (issue #918).
+/// Asserts INV-SM-1 through INV-SM-5 across all reachable sequences.
+pub mod secondary_market;
 pub mod treasury;
 
 /// Decode up to [`crate::MAX_OPS`] operations from `data` and apply each with
