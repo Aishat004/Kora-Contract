@@ -12,6 +12,13 @@ from the existing `dispute_resolution` contract for challenges to defaults.
 3. Make sure the financing pool is authorized to mark the invoice NFT repaid
    and the escrow contract has sufficient ledger lifetime for open disputes.
 
+The pool's escrow address is set once by its admin. The callback arguments
+are `reserve_escrow(escrow, invoice_id, amount)` and
+`settle_escrow(escrow, invoice_id, amount, pay_pool)`; both authenticate the
+configured escrow address and validate the reservation. `escrow_terms` and
+`has_position` supply the custody contract's read interface. No additional
+environment variables are required by this integration.
+
 ## Flow
 
 `open_dispute(challenger, payer, invoice_id, amount)` requires signatures from
@@ -26,19 +33,30 @@ repayment statistics, or investor balances. Normal `repay`, `repay_partial`,
 Before seven days have elapsed, the configured admin calls
 `resolve_dispute(resolver, invoice_id, pay_pool)`. `pay_pool=true` transfers
 the payment to the financing pool and calls its authenticated
-`settle_escrow` hook; that hook credits repayment, distributes yield and marks
-the NFT repaid if the invoice is fully settled. `pay_pool=false` returns the
-token to the SME payer and clears the reservation without crediting repayment.
+`settle_escrow` hook; that hook credits repayment and, when the invoice is
+fully settled, distributes yield and marks the NFT repaid. Partial escrow
+payments remain in the pool until the remaining debt is repaid through
+`repay`; investor balances stay unchanged until final distribution.
+`pay_pool=false` returns the token to the SME payer and clears the reservation
+without crediting repayment.
 After seven days, anyone can call `resolve_timeout(invoice_id)` to refund the
 SME and unblock normal settlement. An invoice may enter this escrow **once**:
 neither resolution nor timeout permits a new dispute for the same invoice.
 
 The escrow and pool callbacks execute in one transaction. A failed transfer
-or settlement rolls back the entire resolution; the dispute remains open.
+or settlement rolls back the escrow adjudication; its custody record remains open.
 Inspect `get_dispute(invoice_id)` and the pool's `get_pool(invoice_id)` to
-verify the outcome. The existing pool's late-penalty and installment rules
-should be considered before choosing an escrow amount; this path applies the
-exact deposited pool-token amount and does not advance installment schedules.
+verify the outcome. This path applies the exact deposited pool-token amount.
+Opening escrow is restricted to funded, unfrozen pools with no prior repayment,
+installment schedule, or early-settlement offer, and a zero late-penalty rate.
+The invoice currency must match the token metadata symbol, the token must use
+seven decimals, and remaining debt must be below the high-value repayment
+approval threshold (10,000,000,000 base units). Other debts use the existing
+repayment/approval paths. A freeze after opening prevents pool-directed
+settlement; refund remains available. Partial escrow credits cannot enter
+`repay_partial`, `net_settle`, new position recording, installment schedules,
+or early-settlement offers. This prevents mixed-path payouts and duplicate
+repayment statistics while held funds await normal repayment or default.
 
 ## Validation
 
@@ -56,11 +74,57 @@ for the provisional-cap rationale; this onboarding did not run builds or
 measure the binary.
 
 `scripts/deploy.sh` uses the exact `kora_dispute_escrow.wasm` filename when
-`DEPLOY_DISPUTE_ESCROW=true` is set (default: false). This is opt-in because
-the current financing pool does not implement the required `escrow_terms`,
-`reserve_escrow`, `settle_escrow`, and `set_dispute_escrow` hooks. Enabling it
-deploys and initializes the escrow and records its address/hash, but pool
-integration must be implemented before using the custody flow above.
+`DEPLOY_DISPUTE_ESCROW=true` is set (default: false). Enabling it deploys and
+initializes the escrow and records its address/hash. Configure the pool's
+one-time escrow address as described above before using the custody flow.
+
+### Cross-contract scenarios (#914)
+
+The dedicated `contracts/tests/dispute_cross_contract.rs` target uses the
+shared `TestWorld` actor builder and production dispute resolution, escrow,
+financing pool, invoice NFT, and token contracts. A deterministic adversarial
+token provides transfer-hook failure/reentry scenarios.
+
+The existing resolution outcome is the boolean `Dispute.upheld`; escalation
+uses `submit_evidence`. The harness reads the recorded outcome and explicitly
+orchestrates the separate escrow adjudication call. These are separate
+invocations: escrow does not read or enforce the resolution outcome, and
+failure during settlement leaves the already-recorded resolution intact.
+The escrow admin remains responsible for choosing `pay_pool` correctly.
+
+| Scenario | Outcome and required state |
+| --- | --- |
+| Open and submit evidence | Payer funds move to escrow; pool repayment and investor balances stay unchanged |
+| Challenge upheld (`upheld=true`) | `pay_pool=false`: escrow refunds the SME and removes the pool reservation |
+| Challenge rejected (`upheld=false`) | `pay_pool=true`: escrow pays the pool; full repayment distributes to investors and closes the pool/NFT |
+| Partial payment to pool | Pool holds the credited amount; final normal repayment distributes once |
+| Default after partial escrow credit | Default distributes the held credit and closes the pool; repeated default cannot pay again |
+| Unauthorized arbiter or missing authorization | Resolution/settlement fails with unchanged custody and pool state |
+| Forged pool callback | Wrong address or missing escrow authorization cannot settle the reservation |
+| Repeated resolution or settlement | Terminal records reject a second release |
+| Underfunded payer or escrow | Failed token transfer rolls back that custody invocation and its pool changes |
+| Repaid invoice | New escrow hold is rejected without moving tokens |
+| Unsupported repayment policy | Frozen invoices, late penalties, currency/decimal mismatch, and high-value debt cannot bypass ordinary repayment checks |
+| Token transfer reentry | Host/contract rejection preserves single release and the other invoice's state |
+
+The issue's release/slash paths correspond here to refund and repayment;
+there is no separate slash enum, penalty transfer, or investor confiscation
+entry point in these contracts.
+
+Run the target from the repository root:
+
+```sh
+cargo +stable test -p kora-tests --test dispute_cross_contract
+```
+
+It is registered as a regular integration test and has a dedicated stable CI
+job with a 20-minute limit. No nightly or opt-in test flag is needed. This
+change was reviewed statically only, per `task2.txt`; there is no local
+build, test, formatter, or execution result to report.
+The fixture starts after marketplace funding: it records the final investor
+allocation through the pool's public admin API. It covers repayment custody
+and settlement, rather than the marketplace purchase transaction. TTL expiry,
+archival, and production resource budgets remain outside this harness.
 
 ### State-machine fuzzing (#919)
 

@@ -79,6 +79,11 @@ path = "auth_fuzzing.rs"
 name = "economic_attack_simulation"
 path = "economic_attack_simulation.rs"
 
+# ── Vesting grant lifecycle integration tests (Issue #965) ──────────────────
+[[test]]
+name = "vesting_lifecycle"
+path = "vesting_lifecycle.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
