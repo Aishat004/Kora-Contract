@@ -1,12 +1,13 @@
 #![no_std]
 
 use kora_access_control::AccessControlContractClient;
+use kora_parameter_registry::ParameterRegistryContractClient;
 use kora_shared::{
     audit::{chain_checksum, AdminActionType, AdminAuditEntry, AuditEntry, AuditSource, MAX_AUDIT_LOG_SIZE},
     errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
-    types::{AllocationDrift, AssetAllocationPolicy, MultisigConfig},
+    types::{AllocationDrift, AssetAllocationPolicy, MultisigConfig, RegistryParamKey},
     validation::{require_non_negative_amount, require_not_self, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
@@ -42,6 +43,7 @@ pub enum TreasuryError {
     InvalidSweepSplits = 21,
     InvalidGrant = 22,
     GrantNotFound = 23,
+    TokenDecimalsNotRegistered = 24,
 }
 
 impl From<CommonError> for TreasuryError {
@@ -84,10 +86,7 @@ impl From<KoraError> for TreasuryError {
 
 /// TTL for treasury multisig proposals — mirrors access_control's PROPOSAL_TTL_LEDGERS (~7 days).
 const TREASURY_PROPOSAL_TTL: u64 = 604_800;
-
-/// Timelock delay between a treasury proposal reaching quorum and being executable.
-/// Mirrors the UPGRADE_TIMELOCK_DELAY (~24h) so treasury withdrawals get the same cooling-off period.
-const TREASURY_GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
+const MAX_TOKEN_DECIMALS: u32 = 18;
 
 // ── Storage TTL constants (~31 days in ledgers) ───────────────────────────────
 const PERSISTENT_BUMP_AMOUNT: u32 = 535_680;
@@ -128,6 +127,8 @@ pub enum DataKey {
     WithdrawalCap(Address),
     /// Pending cap change proposal for a given token: (new_cap, proposed_at).
     WithdrawalCapProposal(Address),
+    /// Shared parameter registry used for grant reserve-floor checks.
+    ParameterRegistry,
     /// Timestamp when the current rate-limit epoch started, per token.
     EpochStart(Address),
     /// Total withdrawn in the current epoch, per token (resets each epoch).
@@ -159,6 +160,8 @@ pub enum DataKey {
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
     TreasuryProposal(u64),
+    /// Shared timelock delay in effect when the proposal was created.
+    TreasuryProposalTimelock(u64),
     NextGrantId,
     Grant(u64),
     // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
@@ -190,6 +193,8 @@ pub enum DataKey {
     SweepSplit,
     /// Primary destination that receives rounding dust from sweep.
     SweepPrimaryDestination,
+    /// Decimal precision used to interpret a token's raw amounts in reports.
+    TokenDecimals(Address),
 }
 
 /// A highest-risk treasury action gated behind `access_control`'s multisig quorum
@@ -204,6 +209,9 @@ pub enum TreasuryAction {
     ReviewGrant(u64),
     ReleaseGrantMilestone(u64),
     ReclaimGrant(u64),
+    SetTimelockDelay(u64),
+    SetParameterRegistry(Address),
+    SetTokenDecimals(Address, u32),
 }
 
 #[contracttype]
@@ -1018,6 +1026,7 @@ impl TreasuryContract {
     ///
     /// **Errors:**
     /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::TokenDecimalsNotRegistered` — A token has no registered decimal precision.
     ///
     /// **Security:** Requires `admin.require_auth()`. Report is persisted for historical tracking.
     pub fn generate_transparency_report(
@@ -1034,6 +1043,12 @@ impl TreasuryContract {
         // Aggregate data for each whitelisted token
         for i in 0..whitelisted_tokens.len() {
             if let Some(token) = whitelisted_tokens.get(i) {
+                let decimals: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::TokenDecimals(token.clone()))
+                    .ok_or(TreasuryError::TokenDecimalsNotRegistered)?;
+
                 // Get accumulated inflows (fees collected for this token)
                 let inflows: i128 = env
                     .storage()
@@ -1048,7 +1063,7 @@ impl TreasuryContract {
                 // In a more complete implementation, we would track explicit withdrawal events
                 let outflows = (inflows - balance).max(0);
 
-                report.set_token_balance(token.clone(), inflows, outflows, balance);
+                report.set_token_balance(token.clone(), decimals, inflows, outflows, balance);
             }
         }
 
@@ -1093,6 +1108,53 @@ impl TreasuryContract {
             .unwrap_or(0)
     }
 
+    /// Set the decimal precision registered for a token.
+    ///
+    /// Direct updates require the admin and are disabled when treasury multisig
+    /// quorum is configured. In that case, use `SetTokenDecimals` through the
+    /// treasury proposal workflow.
+    pub fn set_token_decimals(
+        env: Env,
+        admin: Address,
+        token: Address,
+        decimals: u32,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_no_quorum_required(&env)?;
+        Self::update_token_decimals(&env, &admin, &token, decimals)
+    }
+
+    /// Return the registered number of decimal places for a token, if configured.
+    pub fn get_token_decimals(env: Env, token: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenDecimals(token))
+    }
+
+    fn update_token_decimals(
+        env: &Env,
+        actor: &Address,
+        token: &Address,
+        decimals: u32,
+    ) -> Result<(), KoraError> {
+        if decimals > MAX_TOKEN_DECIMALS {
+            return Err(KoraError::InvalidParameterValue);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenDecimals(token.clone()), &decimals);
+        Self::bump_persistent(env, &DataKey::TokenDecimals(token.clone()));
+        Self::append_audit_entry(
+            env,
+            actor,
+            AdminActionType::SetTokenDecimals,
+            Some(token.clone()),
+            Some(i128::from(decimals)),
+        );
+        Ok(())
+    }
+
     // ── Views ─────────────────────────────────────────────────────────────────
     /// Returns the running total of fees collected for a given token (informational ledger).
     ///
@@ -1134,7 +1196,6 @@ impl TreasuryContract {
     /// - `tokens` — Vec of token contract addresses to aggregate.
     /// - `token_symbols` — Vec of corresponding token symbols (must match length of `tokens`).
     /// - `reference_currency` — The target currency symbol for valuation (e.g., "USDC").
-    /// - `token_decimals` — Vec of token decimal places (must match length of `tokens`).
     /// - `ref_decimals` — Decimal places of the reference currency (typically 6 or 7).
     ///
     /// **Returns:** Total collected fee revenue across all tokens, converted to reference currency.
@@ -1142,23 +1203,20 @@ impl TreasuryContract {
     /// Returns 0 if no oracle is configured or all balances are zero.
     ///
     /// **Errors:**
-    /// - `TreasuryError::InvalidAmount` — Token/symbol/decimal vecs have mismatched lengths.
+    /// - `TreasuryError::InvalidAmount` — Token and symbol vecs have mismatched lengths.
+    /// - `TreasuryError::TokenDecimalsNotRegistered` — A nonzero token balance lacks registered decimals.
     ///
     /// **Security:** Read-only view. No authorization required. Price oracle errors (staleness, missing prices)
     /// are silently tolerated — conversions are skipped for unavailable price pairs.
     ///
-    /// **Note:** This is a temporary workaround pending issue #36 (token registry with decimal metadata).
-    /// Once a registry exists, a simpler `get_total_collected_value()` view with no parameters
-    /// will iterate automatically.
     pub fn get_total_collected_value(
         env: Env,
         tokens: Vec<Address>,
         token_symbols: Vec<Symbol>,
         reference_currency: Symbol,
-        token_decimals: Vec<u32>,
         ref_decimals: u32,
     ) -> Result<i128, TreasuryError> {
-        if tokens.len() != token_symbols.len() || tokens.len() != token_decimals.len() {
+        if tokens.len() != token_symbols.len() {
             return Err(TreasuryError::InvalidAmount);
         }
 
@@ -1178,7 +1236,6 @@ impl TreasuryContract {
         for i in 0..tokens.len() {
             let token_addr = tokens.get(i).unwrap();
             let symbol = token_symbols.get(i).unwrap();
-            let decimals = token_decimals.get(i).unwrap();
 
             let collected: i128 = env
                 .storage()
@@ -1189,6 +1246,12 @@ impl TreasuryContract {
             if collected == 0 {
                 continue;
             }
+
+            let decimals: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TokenDecimals(token_addr.clone()))
+                .ok_or(TreasuryError::TokenDecimalsNotRegistered)?;
 
             // Attempt conversion; if it fails (missing price, stale, etc.), skip this token
             let converted = match oracle_client.try_convert_with_decimals(
@@ -1647,6 +1710,38 @@ impl TreasuryContract {
         env.storage().persistent().get(&DataKey::AccessControl)
     }
 
+    /// Set the parameter registry used to enforce the governed grant reserve floor.
+    pub fn set_parameter_registry(
+        env: Env,
+        admin: Address,
+        registry: Address,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_no_quorum_required(&env)?;
+        Self::update_parameter_registry(&env, &registry)
+    }
+
+    fn update_parameter_registry(env: &Env, registry: &Address) -> Result<(), KoraError> {
+        require_not_self(env, registry)?;
+        let parameter = ParameterRegistryContractClient::new(env, registry)
+            .get_parameter(&RegistryParamKey::MinReserveRatioBps)
+            .ok_or(KoraError::InvalidParameterValue)?;
+        if parameter.value < 0 || parameter.value > 10_000 {
+            return Err(KoraError::InvalidParameterValue);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ParameterRegistry, registry);
+        Self::bump_persistent(env, &DataKey::ParameterRegistry);
+        Ok(())
+    }
+
+    /// Returns the configured parameter registry, if set.
+    pub fn get_parameter_registry(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::ParameterRegistry)
+    }
+
     /// Propose one of treasury's highest-risk actions. Caller must be a signer configured
     /// in the linked `access_control` multisig. The proposer's approval is recorded
     /// automatically, matching `access_control::propose_action`.
@@ -1685,7 +1780,13 @@ impl TreasuryContract {
         env.storage()
             .persistent()
             .set(&DataKey::TreasuryProposal(proposal_id), &proposal);
+        let timelock_delay = kora_shared::timelock::get_delay(&env);
+        env.storage().persistent().set(
+            &DataKey::TreasuryProposalTimelock(proposal_id),
+            &timelock_delay,
+        );
         Self::bump_persistent(&env, &DataKey::TreasuryProposal(proposal_id));
+        Self::bump_persistent(&env, &DataKey::TreasuryProposalTimelock(proposal_id));
         env.storage().persistent().set(
             &DataKey::NextTreasuryProposalId,
             &(proposal_id
@@ -1770,7 +1871,17 @@ impl TreasuryContract {
         if (proposal.approvals.len()) < config.threshold {
             return Err(KoraError::ThresholdNotMet);
         }
-        if env.ledger().timestamp() < proposal.created_at + TREASURY_GOVERNANCE_TIMELOCK_DELAY {
+        let proposed_delay: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryProposalTimelock(proposal_id))
+            .unwrap_or_else(|| kora_shared::timelock::get_delay(&env));
+        let required_delay = proposed_delay.max(kora_shared::timelock::get_delay(&env));
+        let executable_at = proposal
+            .created_at
+            .checked_add(required_delay)
+            .ok_or(KoraError::ArithmeticOverflow)?;
+        if env.ledger().timestamp() < executable_at {
             return Err(KoraError::GovernanceTimelockNotElapsed);
         }
 
@@ -1798,6 +1909,18 @@ impl TreasuryContract {
                 Self::release_grant_milestone(&env, grant_id)?;
             }
             TreasuryAction::ReclaimGrant(grant_id) => Self::reclaim_grant(&env, grant_id)?,
+            TreasuryAction::SetTimelockDelay(delay) => {
+                if delay < UPGRADE_TIMELOCK_DELAY {
+                    return Err(KoraError::InvalidParameterValue);
+                }
+                kora_shared::timelock::set_delay(&env, delay);
+            }
+            TreasuryAction::SetParameterRegistry(registry) => {
+                Self::update_parameter_registry(&env, &registry)?;
+            }
+            TreasuryAction::SetTokenDecimals(token, decimals) => {
+                Self::update_token_decimals(&env, &executor, &token, decimals)?;
+            }
         }
 
         Self::append_audit_entry(
@@ -1883,6 +2006,7 @@ impl TreasuryContract {
     }
 
     fn release_grant_milestone(env: &Env, grant_id: u64) -> Result<(), KoraError> {
+        let _guard = ReentrancyGuard::new(env)?;
         let mut grant: GrantProposal = env.storage().persistent().get(&DataKey::Grant(grant_id))
             .ok_or(KoraError::ProposalNotFound)?;
         if grant.closed {
@@ -1894,17 +2018,65 @@ impl TreasuryContract {
         let amount = grant.milestones.get(grant.next_milestone).ok_or(KoraError::ProposalNotFound)?;
         let balance = token::Client::new(env, &grant.token).balance(&env.current_contract_address());
         let reserve: i128 = env.storage().persistent().get(&DataKey::ReserveBalance(grant.token.clone())).unwrap_or(0);
-        if balance.saturating_sub(reserve) < amount {
-            return Err(KoraError::InsufficientPoolBalance);
+        let registry: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ParameterRegistry)
+            .ok_or(KoraError::NotInitialized)?;
+        let parameter = ParameterRegistryContractClient::new(env, &registry)
+            .get_parameter(&RegistryParamKey::MinReserveRatioBps)
+            .ok_or(KoraError::InvalidParameterValue)?;
+        if parameter.value < 0 || parameter.value > 10_000 {
+            return Err(KoraError::InvalidParameterValue);
         }
-        token::Client::new(env, &grant.token).transfer(&env.current_contract_address(), &grant.recipient, &amount);
-        grant.remaining -= amount;
-        grant.next_milestone += 1;
+        Self::check_grant_reserve(balance, reserve, amount, parameter.value as u32)?;
+
+        grant.remaining = grant
+            .remaining
+            .checked_sub(amount)
+            .ok_or(KoraError::ArithmeticUnderflow)?;
+        grant.next_milestone = grant
+            .next_milestone
+            .checked_add(1)
+            .ok_or(KoraError::ArithmeticOverflow)?;
         grant.last_activity_at = env.ledger().timestamp();
         if grant.next_milestone >= grant.milestones.len() {
             grant.closed = true;
         }
         env.storage().persistent().set(&DataKey::Grant(grant_id), &grant);
+        Self::bump_persistent(env, &DataKey::Grant(grant_id));
+
+        token::Client::new(env, &grant.token).transfer(
+            &env.current_contract_address(),
+            &grant.recipient,
+            &amount,
+        );
+        Ok(())
+    }
+
+    fn check_grant_reserve(
+        balance: i128,
+        earmarked_reserve: i128,
+        amount: i128,
+        min_reserve_ratio_bps: u32,
+    ) -> Result<(), KoraError> {
+        if balance.saturating_sub(earmarked_reserve) < amount {
+            return Err(KoraError::InsufficientPoolBalance);
+        }
+        let ratio_product = balance
+            .checked_mul(min_reserve_ratio_bps as i128)
+            .ok_or(KoraError::ArithmeticOverflow)?;
+        let minimum_remaining = ratio_product
+            .checked_add(9_999)
+            .ok_or(KoraError::ArithmeticOverflow)?
+            .checked_div(10_000)
+            .ok_or(KoraError::ArithmeticOverflow)?;
+        let remaining = balance
+            .checked_sub(amount)
+            .ok_or(KoraError::ArithmeticUnderflow)?;
+        if remaining < minimum_remaining {
+            return Err(KoraError::InsufficientReserveBalance);
+        }
         Ok(())
     }
 
@@ -2655,6 +2827,31 @@ mod tests {
         (env, admin, client)
     }
 
+    #[test]
+    fn test_grant_reserve_floor_preserves_earmarked_and_ratio_reserves() {
+        assert!(TreasuryContract::check_grant_reserve(1_000, 100, 800, 1_000).is_ok());
+        assert_eq!(
+            TreasuryContract::check_grant_reserve(1_000, 100, 901, 1_000),
+            Err(KoraError::InsufficientPoolBalance)
+        );
+        assert_eq!(
+            TreasuryContract::check_grant_reserve(1_000, 0, 901, 1_000),
+            Err(KoraError::InsufficientReserveBalance)
+        );
+        assert_eq!(
+            TreasuryContract::check_grant_reserve(1_001, 0, 1_000, 10),
+            Err(KoraError::InsufficientReserveBalance)
+        );
+    }
+
+    #[test]
+    fn test_grant_reserve_floor_rejects_arithmetic_overflow() {
+        assert_eq!(
+            TreasuryContract::check_grant_reserve(i128::MAX, 0, 1, 10_000),
+            Err(KoraError::ArithmeticOverflow)
+        );
+    }
+
     // ── Basic contract tests ──────────────────────────────────────────────────
     /// Deploy a minimal Soroban token contract and return its address +
     /// a client minted with `amount` to `recipient`.
@@ -2711,6 +2908,50 @@ mod tests {
     fn test_get_fee_bps_after_init() {
         let (_env, _admin, client) = setup();
         assert_eq!(client.get_fee_bps(), 50);
+    }
+
+    #[test]
+    fn test_token_decimal_registry_requires_admin_and_bounds_precision() {
+        let (env, admin, client) = setup();
+        let token = Address::generate(&env);
+
+        client.set_token_decimals(&admin, &token, &0);
+        assert_eq!(client.get_token_decimals(&token), Some(0));
+        client.set_token_decimals(&admin, &token, &18);
+        assert_eq!(client.get_token_decimals(&token), Some(18));
+        assert!(client.try_set_token_decimals(&admin, &token, &19).is_err());
+
+        let non_admin = Address::generate(&env);
+        assert!(client.try_set_token_decimals(&non_admin, &token, &6).is_err());
+        assert_eq!(client.get_token_decimals(&token), Some(18));
+    }
+
+    #[test]
+    fn test_transparency_report_requires_registered_token_decimals() {
+        let (env, admin, client) = setup();
+        let token = Address::generate(&env);
+        let tokens = soroban_sdk::vec![&env, token];
+
+        assert!(client
+            .try_generate_transparency_report(&admin, &1, &tokens)
+            .is_err());
+        assert_eq!(client.get_last_reported_epoch(), 0);
+    }
+
+    #[test]
+    fn test_transparency_report_includes_registered_token_decimals() {
+        let (env, admin, client) = setup();
+        let treasury = client.address.clone();
+        let token = deploy_token(&env, &admin, &treasury, 123_456);
+        client.set_token_decimals(&admin, &token, &6);
+        let tokens = soroban_sdk::vec![&env, token.clone()];
+
+        let report = client.generate_transparency_report(&admin, &1, &tokens);
+        let balance = report.balances.get(0).unwrap();
+
+        assert_eq!(balance.token, token);
+        assert_eq!(balance.decimals, 6);
+        assert_eq!(balance.ending_balance, 123_456);
     }
 
     // ── set_fee_bps ───────────────────────────────────────────────────────────
