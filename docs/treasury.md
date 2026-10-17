@@ -24,11 +24,37 @@ The marketplace transfers the fee amount directly to the treasury's token balanc
 
 `fee_bps` (basis points, 0–10 000) is the protocol's cut of every investor contribution.
 
+The effective fee is determined by the `parameter_registry` when one is configured via `set_registry`. If no registry is set, the local default (50 bps, set at `initialize`) is used.
+
+#### Registry workflow
+
+1. **Deploy** the `parameter_registry` contract and call `initialize(admin, access_control)`.
+2. The registry bootstraps `TreasuryFeeBps` with a default value of 50 (min 0, max 10 000) and `ReserveAllocationBps` with a default of 0 (min 0, max 10 000).
+3. **Wire** the treasury to the registry by calling `set_registry(admin, registry_address)`.
+4. **Govern** the fee through the registry's multisig proposal flow — no contract upgrade needed.
+
+When a registry is configured:
+
+- `collect_fee` reads fee bps and reserve allocation from the registry.
+- `withdraw`/`emergency_withdraw` reserve guards respect the registry's reserve balance.
+- Transparency reports include the effective fee in their `effective_fee_bps` field.
+- If the registry-derived fee differs from the constructor default (50 bps), a `FeeRateUpdated` event is emitted at the first `collect_fee` call.
+
+#### Update path comparison
+
 | Event | Who acts | Effect |
 |-------|----------|--------|
-| `initialize(admin, fee_bps)` | Deployer | Sets initial rate; stored in persistent storage |
-| `set_fee_bps(admin, fee_bps)` | Admin | Updates rate; emits `FeeRateUpdated` event |
-| `fund_invoice(investor, …)` on Marketplace | Investor | `fee = amount × fee_bps / 10_000` deducted before net reaches pool |
+| `initialize(admin)` | Deployer | Sets admin and default fee of 50 bps |
+| `set_fee_bps(admin, fee_bps)` | Admin | Updates local override; emits `FeeRateUpdated` event |
+| `propose_param_update` → `execute_param_update` on registry | Governance signers | Updates governed fee across all consuming contracts |
+| `set_registry(admin, registry_address)` | Admin | Wire treasury to parameter_registry |
+
+#### Lookup order
+
+1. If `DataKey::Registry` is set, read `TreasuryFeeBps` from the registry via `get_value(RegistryParamKey::TreasuryFeeBps)`.
+2. If the registry returns a non-zero value, that is the effective fee.
+3. Otherwise fall back to the locally stored `FeeBps` (set by `initialize` or `set_fee_bps`).
+4. If no local fee has been set, default to 50 bps.
 
 **Default:** 50 bps (0.5 %).
 
@@ -328,8 +354,10 @@ provide the token and symbol lists to this view.
 
 | Function | Auth | Description |
 |----------|------|-------------|
-| `initialize(admin, fee_bps)` | None (one-time) | Set admin and fee rate |
-| `set_fee_bps(admin, fee_bps)` | Admin | Update protocol fee |
+| `initialize(admin)` | None (one-time) | Set admin and default fee of 50 bps |
+| `set_fee_bps(admin, fee_bps)` | Admin | Update protocol fee locally |
+| `set_registry(admin, registry)` | Admin | Wire to parameter_registry for governed parameters |
+| `get_registry()` | None | Current parameter_registry address |
 | `set_access_control(admin, access_control)` | Admin | Wire up pause enforcement (#454) |
 | `whitelist_token(admin, token)` | Admin | Allow token for fee operations |
 | `collect_fee(token, amount)` | None | Record incoming fee (called by marketplace) |
@@ -341,7 +369,7 @@ provide the token and symbol lists to this view.
 | `is_paused()` | None | Whether this treasury sees the protocol as paused |
 | `propose_withdrawal_cap(admin, token, new_cap)` | Admin | Propose new per-token 24 h cap (#452) |
 | `execute_withdrawal_cap(admin, token)` | Admin | Apply per-token cap after timelock |
-| `get_fee_bps()` | None | Read current fee rate |
+| `get_fee_bps()` | None | Read current fee rate (local fallback) |
 | `get_balance(token)` | None | Live token balance |
 | `get_collected(token)` | None | Informational ledger total |
 | `get_withdrawal_cap(token)` | None | Current per-token 24 h cap (0 = uncapped) |
@@ -371,7 +399,9 @@ must go through the `propose_treasury_action` → `execute_treasury_action` flow
 | Key | Tier | Type | Description |
 |-----|------|------|-------------|
 | `Admin` | persistent | `Address` | Admin address |
-| `FeeBps` | persistent | `u32` | Protocol fee rate |
+| `FeeBps` | persistent | `u32` | Protocol fee rate (local fallback) |
+| `DefaultFeeBps` | persistent | `u32` | Constructor default (50) — used to detect registry-driven changes |
+| `Registry` | persistent | `Address` | parameter_registry address (optional) |
 | `PriceOracle` | persistent | `Address` | Price oracle contract (optional) |
 | `Collected(Address)` | persistent | `i128` | Cumulative fees per token |
 | `WhitelistedToken(Address)` | persistent | `bool` | Token whitelist flag |
@@ -397,6 +427,7 @@ Persistent entries are TTL-bumped to ~31 days (`535 680` ledgers) on every write
 - Contract upgrades require a timelock — an attacker cannot swap in malicious code immediately
 - `withdraw` is blocked while the protocol is paused (#454), giving admins a way to halt fund egress on detection
 - `emergency_withdraw` — previously always callable, which fully bypassed the rate-limit cap — now requires a distinct, auditable `declare_emergency` call first (#453)
+- Protocol fee and reserve parameters are governed through the `parameter_registry` multisig, not by a single admin key
 
 **Residual risk:** with a token's cap disabled (`WithdrawalCap(token) = 0`), a compromised key can drain that token's full balance in one transaction via `withdraw`, and any whitelisted token's balance via `emergency_withdraw` once `declare_emergency` has been called (by design, `declare_emergency`/`emergency_withdraw` share the single admin key rather than a stronger multisig — see #453's acceptance criteria for the multisig follow-up this doesn't yet cover). Per-token caps should always be set in production, and `access_control` should be configured via `set_access_control`.
 
