@@ -204,8 +204,67 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      - name: cargo test formal_model
-        run: cargo test -p kora-financing-pool --test formal_model
+  governance-contract-tests:
+    name: test ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        package:
+          - kora-governance
+          - kora-governance-voting
+          - kora-parameter-registry
+          - kora-dispute-escrow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ matrix.package }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-${{ matrix.package }}-
+      - name: Run contract unit tests
+        run: cargo test -p ${{ matrix.package }}
+
+  dispute-cross-contract:
+    name: dispute cross-contract settlement
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-dispute-integration-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-dispute-integration-
+      - name: Run dispute integration scenarios
+        run: cargo test -p kora-tests --test dispute_cross_contract
+
+  dispute-fuzz-smoke:
+    name: dispute state machine fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run bounded opcode sequences
+        env:
+          FUZZ_ITERS: "100"
+        run: cargo test -p kora-fuzz --test smoke fuzz_dispute_resolution -- --ignored
 
   # ── Code coverage gate (issue #643) ──────────────────────────────────────
   #
