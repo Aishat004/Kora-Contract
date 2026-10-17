@@ -91,6 +91,27 @@ smoke!(fuzz_treasury, "treasury", kora_fuzz::targets::treasury::run, 0x7EA5);
 smoke!(fuzz_risk_registry, "risk_registry", kora_fuzz::targets::risk_registry::run, 0x815C);
 smoke!(fuzz_price_oracle, "price_oracle", kora_fuzz::targets::price_oracle::run, 0x0AC1);
 smoke!(fuzz_dispute_resolution, "dispute_resolution", kora_fuzz::targets::dispute_resolution::run, 0xD159);
+smoke!(fuzz_secondary_market_settlement, "secondary_market_settlement", kora_fuzz::targets::secondary_market::run, 0x5EC0);
+
+#[test]
+fn secondary_market_settlement_ci_corpus_replay() {
+    replay_corpus("secondary_market_settlement", kora_fuzz::targets::secondary_market::run);
+}
+
+#[test]
+fn secondary_market_settlement_ci_bounded_random_walk() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5EC0_C1);
+    let mut buf = [0u8; 256];
+    for i in 0..64 {
+        rng.fill_bytes(&mut buf);
+        check_once(
+            "secondary_market_settlement",
+            kora_fuzz::targets::secondary_market::run,
+            &buf,
+            &format!("ci_secondary_market_random_walk iter={i}/64"),
+        );
+    }
+}
 
 #[test]
 fn dispute_invariants_ci_corpus_replay() {
