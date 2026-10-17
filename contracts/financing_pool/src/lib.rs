@@ -13,12 +13,14 @@ pub mod verification {
     }
 }
 
+use kora_parameter_registry::ParameterRegistryContractClient;
 use kora_shared::{
     errors::CommonError,
     events,
     types::{
         EarlySettlementOffer, InstallmentSchedule, Pool, Position,
-        PositionSaleOffer, PositionShare, ProtocolStats, RepaymentApproval, ShareSaleOffer,
+        PositionSaleOffer, PositionShare, ProtocolStats, RegistryParamKey,
+        RepaymentApproval, ShareSaleOffer,
     },
     validation::{bps_of, bps_of_normalized, require_valid_bps_range, UPGRADE_TIMELOCK_DELAY},
 };
@@ -150,6 +152,9 @@ pub enum DataKey {
     AggregateFunded(Address),
     /// Protocol-wide aggregate statistics (pools opened/repaid/defaulted/active).
     ProtocolStats,
+    /// Address of the parameter_registry contract for dynamic governance of
+    /// pool economics (caps, penalties, etc.). Set via `set_parameter_registry`.
+    ParameterRegistry,
     /// Installment repayment schedule for a pool, keyed by invoice ID.
     InstallmentSchedule(u64),
     /// Pending repayment approval for high-value invoices.
@@ -694,11 +699,7 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::InvalidAmount);
         }
 
-        let late_penalty_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::LatePenaltyBps)
-            .ok_or(FinancingPoolError::NotInitialized)?;
+        let late_penalty_bps: u32 = Self::get_late_penalty_bps(&env);
 
         let pool = Pool {
             invoice_id,
@@ -752,6 +753,44 @@ impl FinancingPoolContract {
         }
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
         Ok(())
+    }
+
+    /// Wire the `parameter_registry` contract address so pool economics
+    /// (`LatePenaltyBps`, `MaxPositionBps`) are read from governance-tunable
+    /// registry keys instead of the static constructor values.
+    ///
+    /// Until this pointer is set (or when a registry key is absent), the
+    /// constructor values stored at initialisation act as bootstrap defaults.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the contract admin (requires auth).
+    /// - `registry` — The address of the deployed `parameter_registry` contract.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::NotAdmin` — Caller is not the admin.
+    /// - `FinancingPoolError::InvalidAddress` — `registry` is the contract's own address.
+    ///
+    /// **Security:** Admin-only.
+    pub fn set_parameter_registry(
+        env: Env,
+        admin: Address,
+        registry: Address,
+    ) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &registry)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ParameterRegistry, &registry);
+        Ok(())
+    }
+
+    /// Returns the configured `parameter_registry` contract address, or `None`
+    /// if the pool has not been wired to a registry yet.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_parameter_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ParameterRegistry)
     }
 
     /// Updates the percentage of late-penalty payments routed to the treasury.
@@ -926,12 +965,10 @@ impl FinancingPoolContract {
             .and_then(|v| v.checked_div(total_pool))
             .ok_or(FinancingPoolError::ArithmeticOverflow)? as u32;
 
-        // Enforce per-investor concentration cap
-        let max_position_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxPositionBps)
-            .unwrap_or(5_000);
+        // Enforce per-investor concentration cap (registry-tunable, falls back
+        // to the constructor-stored default when the registry is not wired or
+        // the key is absent).
+        let max_position_bps: u32 = Self::get_max_position_bps(&env);
         if share_bps > max_position_bps {
             return Err(FinancingPoolError::ExceedsFundingTarget);
         }
@@ -1504,9 +1541,10 @@ impl FinancingPoolContract {
             }
 
             // Apply late penalty if this installment is past its due_date.
-            if !pool.penalty_applied && pool.late_penalty_bps > 0 {
+            let penalty_bps = Self::get_late_penalty_bps(env);
+            if !pool.penalty_applied && penalty_bps > 0 {
                 if env.ledger().timestamp() > installment.due_date {
-                    let penalty = bps_of(pool.face_value, pool.late_penalty_bps)?;
+                    let penalty = bps_of(pool.face_value, penalty_bps)?;
 
                     // Split the penalty: a configurable portion goes to the
                     // treasury, the remainder is added to total_owed for investors.
@@ -1551,9 +1589,13 @@ impl FinancingPoolContract {
             events::installment_paid(&env, invoice_id, &payer, idx, effective_amount);
         } else {
             // No schedule — lump-sum late penalty logic.
-            if !pool.penalty_applied && pool.late_penalty_bps > 0 {
+            // The registry value is read here (not from the pool snapshot) so
+            // governance can tune penalty rates for existing pools; the pool's
+            // stored value is the pre-registry bootstrap default.
+            let penalty_bps = Self::get_late_penalty_bps(env);
+            if !pool.penalty_applied && penalty_bps > 0 {
                 if env.ledger().timestamp() > invoice.due_date {
-                    let penalty = bps_of(pool.face_value, pool.late_penalty_bps)?;
+                    let penalty = bps_of(pool.face_value, penalty_bps)?;
 
                     // Split the penalty: a configurable portion goes to the
                     // treasury, the remainder is added to total_owed for investors.
@@ -2996,6 +3038,53 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::NotAdmin);
         }
         Ok(())
+    }
+
+    /// Read `LatePenaltyBps` from the `parameter_registry` when wired, falling
+    /// back to the constructor-stored default (bootstrap value) when the
+    /// registry is absent, the key is missing, or the read fails.
+    fn get_late_penalty_bps(env: &Env) -> u32 {
+        Self::get_registry_bps(env, RegistryParamKey::LatePenaltyBps)
+            .unwrap_or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::LatePenaltyBps)
+                    .unwrap_or(500)
+            })
+    }
+
+    /// Read `MaxPositionBps` from the `parameter_registry` when wired, falling
+    /// back to the constructor-stored default (bootstrap value) when the
+    /// registry is absent, the key is missing, or the read fails.
+    fn get_max_position_bps(env: &Env) -> u32 {
+        Self::get_registry_bps(env, RegistryParamKey::MaxPositionBps)
+            .unwrap_or_else(|| {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::MaxPositionBps)
+                    .unwrap_or(5_000)
+            })
+    }
+
+    /// Shared registry read for bps-valued parameters.  Returns `None` — so the
+    /// caller falls back to the local bootstrap default — when the registry is
+    /// not wired, the key is absent, the read fails, or the returned value is
+    /// out of the valid bps range [0, 10 000].
+    fn get_registry_bps(env: &Env, key: RegistryParamKey) -> Option<u32> {
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ParameterRegistry)?;
+        let client = ParameterRegistryContractClient::new(env, &registry_addr);
+        // try_* keeps the call non-fatal: a misconfigured or upgraded registry
+        // makes the pool fall back to bootstrap defaults instead of reverting.
+        let param = client.try_get_parameter(&key).ok().flatten()?;
+        let value = u32::try_from(param.value).ok()?;
+        if value <= 10_000 {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     /// Convert `amount` between currencies using the price oracle.

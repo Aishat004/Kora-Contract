@@ -95,6 +95,5 @@ kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
-kora-governance-voting = { path = "../governance_voting" }
-kora-vesting = { path = "../vesting" }
+kora-parameter-registry = { path = "../parameter_registry" }
 
